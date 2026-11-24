@@ -106,8 +106,27 @@ const IC = {
   minus: '<path d="M5 12h14"/>',
   sun: '<circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+  xls: '<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 12l5 5M14 12l-5 5"/>',
+  pdf: '<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
+  adduser: '<circle cx="10" cy="8" r="4"/><path d="M2.5 21a7.5 7.5 0 0 1 15 0M19 8v6M16 11h6"/>',
 };
 const icon = (n) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${IC[n] || ""}</svg>`;
+
+/* =================== Excel / PDF download buttons =================== */
+const expBtns = (id) => `<span class="exp" id="${id}"><a class="btn alt" data-f="xlsx" href="#" title="Download as Excel">${icon("xls")}Excel</a><a class="btn alt" data-f="pdf" href="#" title="Download as PDF">${icon("pdf")}PDF</a></span>`;
+function setExp(id, section, params = {}) {
+  const box = $(id); if (!box) return; const qs = new URLSearchParams(params).toString();
+  for (const x of box.querySelectorAll("a")) x.href = `/api/export/${section}.${x.dataset.f}${qs ? "?" + qs : ""}`;
+}
+
+// "Recorded by" filter: shows one person's records; the Excel/PDF buttons follow it.
+const staffSel = (id) => `<label class="fl">Recorded by<select id="${id}"><option value="">Everyone</option>${opts(Object.entries(S.boot?.names || {}).sort((x, y) => x[1].localeCompare(y[1])))}</select></label>`;
+const withUser = (p, sel) => { const u = $(sel)?.value; return u ? { ...p, user: u } : p; };
+function activityModal(uid, name) {
+  modal({ title: `Download activity — ${esc(name)}`, body: `<p style="margin-top:0">Everything ${esc(name)} recorded in the period: sales, expenses, stock changes and every action in the system — without downloading the whole report.</p>` +
+      rangeBar("acr", "month") + `<div class="toolbar">${expBtns("acx")}</div>`,
+    onMount: () => { const set = (f, t) => setExp("acx", "activity", { from: f, to: t, user: uid }); const get = bindRange("acr", set); set(...get()); } });
+}
 
 /* =================== theme =================== */
 function paintTheme() { const d = document.documentElement.dataset.theme === "dark"; $("theme").innerHTML = icon(d ? "sun" : "moon"); $("theme").setAttribute("aria-label", d ? "Switch to light mode" : "Switch to dark mode"); }
@@ -189,7 +208,7 @@ const bars = (rows, color = "var(--pri)", fmtv = rwf) => { const mx = Math.max(1
 /* =================== receipt =================== */
 function receiptHTML(s) {
   const names = S.boot?.names || {};
-  return `<div class="receipt"><h4>${esc(S.shop.name)}</h4><div class="c">${esc(S.shop.tagline || "")}<br>${esc(S.shop.address || "")}<br>${esc(S.shop.phone || "")}</div><hr>
+  return `<div class="receipt"><img src="brand/logo-192.png" alt="" class="logo"><h4>${esc(S.shop.name)}</h4><div class="c">${esc(S.shop.tagline || "")}<br>${esc(S.shop.address || "")}<br>${esc(S.shop.phone || "")}</div><hr>
   ${s.voided ? `<div class="void">CANCELLED — ${esc(s.void_reason || "")}</div>` : ""}
   <div>Receipt: <b>${esc(s.receipt_no)}</b><br>Date: ${esc(nice(s.date))} ${tm(s.t)}<br>Cashier: ${esc(names[s.user_id] || "—")}${s.customer ? `<br>Customer: ${esc(s.customer)}` : ""}</div><hr>
   <table><tbody>${s.items.map((i) => `<tr><td colspan="2">${esc(i.name)}</td></tr><tr><td>${q(i.qty)} × ${fmt(i.price)}</td><td class="n">${fmt(i.line_total)}</td></tr>`).join("")}</tbody></table><hr>
@@ -200,7 +219,7 @@ function receiptHTML(s) {
 function printHTML(html) { $("print-area").innerHTML = html; window.print(); }
 function showReceipt(s, after) {
   modal({ title: `Receipt ${esc(s.receipt_no)}`, body: receiptHTML(s) + (s.voided ? `<p class="hint" style="text-align:center">Cancelled by ${esc(S.boot.names[s.void_by] || "—")} on ${esc(when(s.void_t))}</p>` : ""),
-    foot: `${!s.voided && can("sales.void") ? `<button class="btn red" id="rvoid">Cancel sale</button><span style="flex:1"></span>` : ""}<button class="btn alt" data-close>Close</button><button class="btn" id="rprint">${icon("print")}Print</button>`,
+    foot: `${!s.voided && can("sales.void") ? `<button class="btn red" id="rvoid">Cancel sale</button><span style="flex:1"></span>` : ""}<button class="btn alt" data-close>Close</button><a class="btn alt" href="/api/sales/${s.id}/receipt.pdf" target="_blank" rel="noopener">${icon("pdf")}PDF</a><button class="btn" id="rprint">${icon("print")}Print</button>`,
     onMount: () => {
       $("rprint").addEventListener("click", () => printHTML(receiptHTML(s)));
       const v = $("rvoid"); if (v) v.addEventListener("click", () => formModal({ title: `Cancel sale ${esc(s.receipt_no)}`, danger: true, submit: "Cancel this sale",
@@ -238,7 +257,7 @@ PAGES.pos = async (el) => {
   const sellable = S.boot.products.filter((p) => !p.archived && p.sellable);
   const cats = [...new Set(sellable.map((p) => p.category))];
   let cat = "all", search = "";
-  el.innerHTML = `<div class="pos"><div class="card"><div class="hd"><input id="ps" placeholder="Search items… (Enter adds the first match)" autocomplete="off"></div>
+  el.innerHTML = `<div class="pos"><div class="card"><div class="hd"><input id="ps" placeholder="Search items… (Enter adds the first match)" autocomplete="off">${S.boot.allow_custom ? `<button class="btn alt" id="pcustom" title="Sell something that is not in the item list">${icon("plus")}Custom item</button>` : ""}</div>
     <div class="bd"><div class="chips" id="pc" style="margin-bottom:12px"><button data-c="all" aria-pressed="true">All</button>${cats.map((c) => `<button data-c="${esc(c)}" aria-pressed="false">${esc(c)}</button>`).join("")}</div><div class="items" id="pi"></div></div></div>
     <div class="card cart"><div class="hd"><h2>Current sale</h2><span class="sp"></span><button class="btn sm ghost" id="pclear">Clear</button></div><div id="plines"></div>
     <div class="bd" style="border-top:1px solid var(--line);display:grid;gap:10px">
@@ -254,7 +273,7 @@ PAGES.pos = async (el) => {
   const drawCart = () => {
     const sub = S.cart.reduce((a, l) => a + l.qty * l.price, 0), disc = Math.min(num(S.pos.discount), sub);
     $("plines").innerHTML = S.cart.length ? S.cart.map((l, i) => { const p = prodById(l.id), over = p && l.qty > p.on_hand;
-      return `<div class="cl"><div><b>${esc(l.name)}</b><br><small>${can("price.override") ? `<input data-pr="${i}" value="${l.price}" inputmode="numeric" style="width:96px;min-height:30px;padding:3px 6px">` : rwf(l.price)} each${over ? ` · <span class="warn">only ${q(p.on_hand)} in stock</span>` : ""}</small></div>
+      return `<div class="cl"><div><b>${esc(l.name)}</b>${l.custom ? `<span class="tag custom">custom</span>` : ""}<br><small>${can("price.override") || l.custom ? `<input data-pr="${i}" value="${l.price}" inputmode="numeric" style="width:96px;min-height:30px;padding:3px 6px">` : rwf(l.price)} each${over ? ` · <span class="warn">only ${q(p.on_hand)} in stock</span>` : ""}</small></div>
       <div class="qty"><button data-dec="${i}" aria-label="Less">−</button><input data-q="${i}" value="${l.qty}" inputmode="decimal" aria-label="Quantity"><button data-inc="${i}" aria-label="More">+</button></div><b class="n" style="min-width:74px;text-align:end">${fmt(l.qty * l.price)}</b></div>`; }).join("") : `<div class="empty">Tap items to add them to this sale.</div>`;
     $("ptot").innerHTML = `<div style="border-top:1px solid var(--line);padding-top:6px"><div class="tot-row"><span>Subtotal</span><span>${rwf(sub)}</span></div>${disc ? `<div class="tot-row"><span>Discount</span><span>−${rwf(disc)}</span></div>` : ""}<div class="tot-row big"><span>Total</span><span>${rwf(sub - disc)}</span></div></div>`;
     $("pdone").disabled = !S.cart.length;
@@ -269,6 +288,26 @@ PAGES.pos = async (el) => {
   $("plines").addEventListener("change", (e) => { const t = e.target;
     if (t.dataset.q != null) { const i = +t.dataset.q, v = num(t.value); if (v <= 0) S.cart.splice(i, 1); else S.cart[i].qty = v; drawCart(); }
     if (t.dataset.pr != null) { S.cart[+t.dataset.pr].price = Math.max(0, num(t.value)); drawCart(); } });
+  $("pcustom")?.addEventListener("click", () => {
+    const M = can("items.manage");
+    formModal({ title: "Add a custom item to this sale", submit: "Add to sale",
+      fields: fld("What is it?", `<input name="name" required maxlength="80" placeholder="e.g. Special order: 3-tier wedding cake">`, true) +
+        fld("Price each (RWF)", `<input name="price" inputmode="numeric" required>`) + fld("Quantity", `<input name="qty" inputmode="decimal" value="1" required>`) +
+        (can("costs.view") ? fld("Cost each (RWF) — optional, for profit reports", `<input name="cost" inputmode="numeric" placeholder="0">`, true) : "") +
+        (M ? `<label class="w" style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" name="save" value="1" id="csave" style="width:20px;min-height:20px"> Also save it to the item list (so it can be sold and stocked again)</label>` +
+          `<label class="fl w" id="ccatw" hidden>Category<input name="category" list="ccatl" value="${esc(S.boot.lists.categories[0] || "")}"><datalist id="ccatl">${S.boot.lists.categories.map((c) => `<option value="${esc(c)}">`).join("")}</datalist></label>` : ""),
+      note: `<p class="hint">A custom item is sold only on this receipt. It does not change stock levels. It is recorded in the audit log.</p>`,
+      onSubmit: async (v) => {
+        const price = num(v.price), qty = num(v.qty); if (!v.name.trim()) throw new Error("Give the item a name."); if (price < 0) throw new Error("Check the price."); if (qty <= 0) throw new Error("Check the quantity.");
+        if (v.save === "1") {
+          await api("/api/items", { method: "POST", body: { name: v.name, price, cost: num(v.cost), category: v.category || "Other", unit: "Piece", reorder: 0, opening: 0, sellable: true } });
+          await refreshBoot(); const p = S.boot.products.find((x) => x.name.toLowerCase() === v.name.trim().toLowerCase());
+          if (p) S.cart.push({ id: p.id, name: p.name, price: p.price, qty }); closeModal(); toast("Saved to the item list and added to the sale"); go("pos", true); return;
+        }
+        S.cart.push({ id: "c" + Date.now(), custom: true, name: v.name.trim(), price, qty, cost: num(v.cost) }); closeModal(); drawCart(); toast("Custom item added");
+      } });
+    const cs = $("csave"); if (cs) cs.addEventListener("change", () => { $("ccatw").hidden = !cs.checked; });
+  });
   $("pclear").addEventListener("click", () => { S.cart = []; S.pos.discount = 0; $("pdisc").value = ""; drawCart(); });
   $("pdisc").addEventListener("input", (e) => { S.pos.discount = num(e.target.value); drawCart(); });
   $("pcust").addEventListener("input", (e) => { S.pos.customer = e.target.value; });
@@ -278,7 +317,7 @@ PAGES.pos = async (el) => {
     const b = $("pdone"); b.disabled = true; $("perr").textContent = "";
     const c = S.boot.customers.find((x) => x.name.toLowerCase() === S.pos.customer.trim().toLowerCase());
     try {
-      const r = await api("/api/sales", { method: "POST", body: { items: S.cart.map((l) => ({ product_id: l.id, qty: l.qty, ...(can("price.override") ? { price: l.price } : {}) })),
+      const r = await api("/api/sales", { method: "POST", body: { items: S.cart.map((l) => (l.custom ? { custom: true, name: l.name, qty: l.qty, price: l.price, cost: l.cost || 0 } : { product_id: l.id, qty: l.qty, ...(can("price.override") ? { price: l.price } : {}) })),
         discount: num(S.pos.discount), method: S.pos.method, customer: S.pos.customer, customer_id: c?.id, referred_by: S.pos.ref } });
       S.cart = []; S.pos = { method: S.pos.method, customer: "", customer_id: null, discount: 0, ref: "" };
       await refreshBoot(); toast(`Sale saved — ${r.sale.receipt_no}`); showReceipt(r.sale, () => go("pos")); go("pos", true);
@@ -289,7 +328,7 @@ PAGES.pos = async (el) => {
 
 /* ---------- Sales & receipts ---------- */
 PAGES.sales = async (el, alive) => {
-  el.innerHTML = rangeBar("sr", "today", `<label class="fl grow">Search<input id="ss" placeholder="Receipt number, customer or item"></label>`) + `<div id="sb"></div>`;
+  el.innerHTML = rangeBar("sr", "today", `${staffSel("su")}<label class="fl grow">Search<input id="ss" placeholder="Receipt number, customer or item"></label>${expBtns("sx")}`) + `<div id="sb"></div>`;
   let data = [];
   const draw = () => {
     const s = $("ss").value.trim().toLowerCase();
@@ -299,8 +338,8 @@ PAGES.sales = async (el, alive) => {
     <div class="card tw"><table><thead><tr><th>Receipt</th><th>Date & time</th><th>Customer</th><th>Items</th><th>Paid by</th><th>Cashier</th><th class="n">Total</th><th>Status</th></tr></thead><tbody>
     ${rows.length ? rows.map((x, i) => `<tr class="click" data-i="${data.indexOf(x)}"><td><b>${esc(x.receipt_no)}</b></td><td>${esc(short(x.date))} ${tm(x.t)}</td><td>${esc(x.customer || "—")}</td><td>${esc(x.items.map((i) => `${q(i.qty)}× ${i.name}`).join(", "))}</td><td>${esc(x.method)}</td><td>${esc(S.boot.names[x.user_id] || "—")}</td><td class="n${x.voided ? " strike" : ""}"><b>${rwf(x.total)}</b></td><td>${x.voided ? `<span class="tag t-cor">Cancelled</span>` : `<span class="tag t-pri">Paid</span>`}</td></tr>`).join("") : `<tr><td colspan="8" class="empty">No sales in this period.</td></tr>`}</tbody></table></div>`;
   };
-  const load = async (a, b) => { await refreshBoot(); data = (await api(`/api/sales?from=${a}&to=${b}`)).sales; if (alive()) draw(); };
-  const get = bindRange("sr", load); $("ss").addEventListener("input", draw);
+  const load = async (a, b) => { const p = withUser({ from: a, to: b }, "su"); setExp("sx", "sales", p); await refreshBoot(); data = (await api(`/api/sales?${new URLSearchParams(p)}`)).sales; if (alive()) draw(); };
+  const get = bindRange("sr", load); $("ss").addEventListener("input", draw); $("su").addEventListener("change", () => load(...get()));
   $("sb").addEventListener("click", (e) => { const r = e.target.closest("tr[data-i]"); if (r) showReceipt(data[+r.dataset.i], () => load(...get())); });
   await load(...get());
 };
@@ -326,7 +365,7 @@ PAGES.items = async (el, alive) => {
   await refreshBoot(); if (!alive()) return;
   const M = can("items.manage"), C = can("costs.view");
   el.innerHTML = `<div class="toolbar"><label class="fl grow">Search<input id="is" placeholder="Name or code"></label><label class="fl">Category<select id="ic"><option value="">All categories</option>${opts([...new Set(S.boot.products.map((p) => p.category))])}</select></label>
-    <label class="fl" style="flex-direction:row;display:flex;gap:8px;align-items:center;min-height:42px"><input type="checkbox" id="ia" style="width:18px;min-height:18px">Show removed</label>${M ? `<button class="btn" id="iadd">${icon("plus")}Add item</button>` : ""}</div><div class="card tw" id="it"></div>
+    <label class="fl" style="flex-direction:row;display:flex;gap:8px;align-items:center;min-height:42px"><input type="checkbox" id="ia" style="width:18px;min-height:18px">Show removed</label>${expBtns("ix")}${M ? `<button class="btn" id="iadd">${icon("plus")}Add item</button>` : ""}</div><div class="card tw" id="it"></div>
     ${M ? "" : `<p class="hint">Only managers and administrators can add or change items.</p>`}`;
   const draw = () => {
     const s = $("is").value.toLowerCase(), c = $("ic").value, a = $("ia").checked;
@@ -336,6 +375,7 @@ PAGES.items = async (el, alive) => {
       ${C ? `<td class="n">${rwf(p.cost)}</td><td class="n">${p.sellable && p.price ? Math.round(((p.price - p.cost) / p.price) * 100) + "%" : "—"}</td>` : ""}<td class="n"><b>${q(p.on_hand)}</b></td><td>${p.archived ? `<span class="tag t-mute">Removed</span>` : stTag(p)}</td>
       ${M ? `<td style="white-space:nowrap"><button class="btn sm alt" data-e="${p.id}">Edit</button> <button class="btn sm ghost" data-a="${p.id}">${p.archived ? "Restore" : "Remove"}</button></td>` : ""}</tr>`).join("") : `<tr><td colspan="10" class="empty">No items found.</td></tr>`}</tbody></table>`;
   };
+  setExp("ix", "items");
   for (const i of ["is", "ic", "ia"]) $(i).addEventListener("input", draw);
   $("iadd")?.addEventListener("click", () => itemModal(null, () => go("items", true)));
   $("it").addEventListener("click", async (e) => {
@@ -371,9 +411,10 @@ function voidModal(title, url, after) {
 PAGES.inventory = async (el, alive) => {
   await refreshBoot(); if (!alive()) return;
   let tab = "levels", low = false;
-  el.innerHTML = `<div class="toolbar"><div class="chips" id="vt"><button data-t="levels" aria-pressed="true">Stock levels</button><button data-t="moves" aria-pressed="false">Movements</button></div><span style="flex:1"></span>
+  el.innerHTML = `<div class="toolbar"><div class="chips" id="vt"><button data-t="levels" aria-pressed="true">Stock levels</button><button data-t="moves" aria-pressed="false">Movements</button></div>${expBtns("vx")}<span style="flex:1"></span>
     ${can("stock.in") ? `<button class="btn" id="v-in">${icon("in")}Receive stock</button>` : ""}${can("stock.loss") ? `<button class="btn alt" id="v-loss">${icon("minus")}Used / damaged</button>` : ""}${can("stock.count") ? `<button class="btn alt" id="v-count">Stock count</button>` : ""}</div><div id="vb"></div>`;
   const levels = () => {
+    setExp("vx", "inventory");
     const P = S.boot.products.filter((p) => !p.archived), C = can("costs.view"), val = P.reduce((a, p) => a + Math.max(p.on_hand, 0) * (p.cost || 0), 0);
     $("vb").innerHTML = `<div class="kpis"><div class="card kpi"><p>Items</p><strong>${P.length}</strong></div><div class="card kpi ${P.filter((p) => p.status === "low").length ? "r" : ""}"><p>Running low</p><strong>${P.filter((p) => p.status === "low").length}</strong></div><div class="card kpi"><p>Need checking</p><strong>${P.filter((p) => p.status === "check").length}</strong></div>${C ? `<div class="card kpi"><p>Stock value (at cost)</p><strong>${rwf(val)}</strong></div>` : ""}</div>
     <div class="toolbar"><label class="fl grow">Search<input id="ls" placeholder="Item name"></label><div class="chips"><button id="llow" aria-pressed="${low}">Low only</button></div></div><div class="card tw" id="lt"></div>`;
@@ -386,9 +427,9 @@ PAGES.inventory = async (el, alive) => {
   };
   const movesTable = (m) => `<div class="tw"><table><thead><tr><th>Date</th><th>Item</th><th>Type</th><th class="n">Qty</th>${can("costs.view") ? `<th class="n">Cost each</th>` : ""}<th>Details</th><th>By</th><th></th></tr></thead><tbody>${m.length ? m.map((x) => `<tr${x.voided ? ' class="strike"' : ""}><td>${esc(short(x.date))} ${tm(x.t)}</td><td><b>${esc(x.name)}</b></td><td><span class="tag ${MOVE[x.type]?.[1] || "t-mute"}">${esc(MOVE[x.type]?.[0] || x.type)}</span></td><td class="n"><b class="${x.qty > 0 ? "ok" : "bad"}">${x.qty > 0 ? "+" : ""}${q(x.qty)}</b></td>${can("costs.view") ? `<td class="n">${rwf(x.unit_cost || 0)}</td>` : ""}<td class="mute">${esc([x.supplier, x.ref, x.note, x.voided ? "Cancelled: " + x.void_reason : ""].filter(Boolean).join(" · "))}</td><td>${esc(S.boot.names[x.user_id] || "—")}</td><td>${!x.voided && can("stock.void") && x.type !== "opening" ? `<button class="btn sm ghost" data-v="${x.id}">Cancel</button>` : ""}</td></tr>`).join("") : `<tr><td colspan="8" class="empty">No stock changes.</td></tr>`}</tbody></table></div>`;
   const moves = async () => {
-    $("vb").innerHTML = rangeBar("mr", "month") + `<div class="card" id="mt"></div>`;
-    const load = async (a, b) => { const m = (await api(`/api/moves?from=${a}&to=${b}`)).moves; if (alive()) $("mt").innerHTML = movesTable(m); };
-    const get = bindRange("mr", load);
+    $("vb").innerHTML = rangeBar("mr", "month", staffSel("mu")) + `<div class="card" id="mt"></div>`;
+    const load = async (a, b) => { const p = withUser({ from: a, to: b }, "mu"); setExp("vx", "movements", p); const m = (await api(`/api/moves?${new URLSearchParams(p)}`)).moves; if (alive()) $("mt").innerHTML = movesTable(m); };
+    const get = bindRange("mr", load); $("mu").addEventListener("change", () => load(...get()));
     $("mt").addEventListener("click", (e) => { const v = e.target.closest("[data-v]"); if (v) voidModal("Cancel stock change", `/api/moves/${v.dataset.v}/void`, () => load(...get())); });
     await load(...get());
   };
@@ -410,16 +451,17 @@ function expenseModal(after) {
 }
 PAGES.expenses = async (el, alive) => {
   await refreshBoot();
-  el.innerHTML = rangeBar("er", "month", can("expense.add") ? `<span style="flex:1"></span><button class="btn" id="eadd">${icon("plus")}Add expense</button>` : "") + `<div id="eb"></div>`;
+  el.innerHTML = rangeBar("er", "month", `${staffSel("eu")}<span style="flex:1"></span>${expBtns("ex")}${can("expense.add") ? `<button class="btn" id="eadd">${icon("plus")}Add expense</button>` : ""}`) + `<div id="eb"></div>`;
   const load = async (a, b) => {
-    const E = (await api(`/api/expenses?from=${a}&to=${b}`)).expenses; if (!alive()) return;
+    const p = withUser({ from: a, to: b }, "eu"); setExp("ex", "expenses", p);
+    const E = (await api(`/api/expenses?${new URLSearchParams(p)}`)).expenses; if (!alive()) return;
     const ok = E.filter((x) => !x.voided), tot = ok.reduce((s, x) => s + x.amount, 0), cat = {}; for (const x of ok) cat[x.category] = (cat[x.category] || 0) + x.amount;
     $("eb").innerHTML = `<div class="kpis"><div class="card kpi"><p>Total expenses</p><strong>${rwf(tot)}</strong></div><div class="card kpi"><p>Number of expenses</p><strong>${ok.length}</strong></div><div class="card kpi"><p>Biggest type</p><strong style="font-size:20px">${esc(Object.entries(cat).sort((a, b) => b[1] - a[1])[0]?.[0] || "—")}</strong></div></div>
     <div class="cols"><div class="card tw"><table><thead><tr><th>Date</th><th>Type</th><th>Description</th><th>Paid by</th><th>By</th><th class="n">Amount</th><th></th></tr></thead><tbody>
     ${E.length ? E.map((x) => `<tr${x.voided ? ' class="strike"' : ""}><td>${esc(short(x.date))}</td><td><span class="tag t-cor">${esc(x.category)}</span></td><td>${esc(x.description || "—")}${x.voided ? `<br><small class="bad">Cancelled: ${esc(x.void_reason)}</small>` : ""}</td><td>${esc(x.method)}</td><td>${esc(S.boot.names[x.user_id] || "—")}</td><td class="n"><b>${rwf(x.amount)}</b></td><td>${!x.voided && can("expense.void") ? `<button class="btn sm ghost" data-v="${x.id}">Cancel</button>` : ""}</td></tr>`).join("") : `<tr><td colspan="7" class="empty">No expenses in this period.</td></tr>`}</tbody></table></div>
     <div class="card"><div class="hd"><h2>By type</h2></div>${bars(Object.entries(cat).map(([name, v]) => ({ name, v })).sort((a, b) => b.v - a.v), "var(--cor)")}</div></div>`;
   };
-  const get = bindRange("er", load);
+  const get = bindRange("er", load); $("eu").addEventListener("change", () => load(...get()));
   $("eadd")?.addEventListener("click", () => expenseModal(() => load(...get())));
   $("eb").addEventListener("click", (e) => { const v = e.target.closest("[data-v]"); if (v) voidModal("Cancel expense", `/api/expenses/${v.dataset.v}/void`, () => load(...get())); });
   await load(...get());
@@ -428,9 +470,10 @@ PAGES.expenses = async (el, alive) => {
 /* ---------- Day book ---------- */
 PAGES.daybook = async (el, alive) => {
   await refreshBoot();
-  el.innerHTML = `<div class="toolbar"><button class="btn alt" id="dp">‹ Previous day</button><label class="fl">Day<input type="date" id="dd" value="${today()}" max="${today()}"></label><button class="btn alt" id="dn">Next day ›</button><button class="btn alt" id="dt">Today</button><span style="flex:1"></span><button class="btn alt" id="dprint">${icon("print")}Print day</button></div><div id="db"></div>`;
+  el.innerHTML = `<div class="toolbar"><button class="btn alt" id="dp">‹ Previous day</button><label class="fl">Day<input type="date" id="dd" value="${today()}" max="${today()}"></label><button class="btn alt" id="dn">Next day ›</button><button class="btn alt" id="dt">Today</button><span style="flex:1"></span>${expBtns("dx")}<button class="btn alt" id="dprint">${icon("print")}Print</button></div><div id="db"></div>`;
   let D;
   const load = async () => {
+    setExp("dx", "daybook", { date: $("dd").value });
     D = await api(`/api/daybook?date=${$("dd").value}`); if (!alive()) return;
     const S1 = D.sales.filter((s) => !s.voided), sales = S1.reduce((a, s) => a + s.total, 0), exp = D.expenses.filter((x) => !x.voided).reduce((a, x) => a + x.amount, 0);
     const byM = {}; for (const s of S1) byM[s.method] = (byM[s.method] || 0) + s.total;
@@ -453,10 +496,11 @@ PAGES.daybook = async (el, alive) => {
 /* ---------- Reports ---------- */
 PAGES.reports = async (el, alive) => {
   await refreshBoot();
-  el.innerHTML = rangeBar("rr", "month", `<span style="flex:1"></span>${can("export") ? `<a class="btn" id="rx" href="#">${icon("down")}Export to Excel</a>` : ""}`) + `<div id="rb"></div>`;
+  el.innerHTML = rangeBar("rr", "month", `<span style="flex:1"></span>${expBtns("rxx")}${can("export") ? `<a class="btn" id="rx" href="#" title="Every receipt, sale line, stock movement and expense in one workbook">${icon("down")}All data (Excel)</a>` : ""}`) + `<div id="rb"></div>`;
   const load = async (a, b) => {
     const R = await api(`/api/reports?from=${a}&to=${b}`); if (!alive()) return;
     if ($("rx")) $("rx").href = `/api/export.xlsx?from=${a}&to=${b}`;
+    setExp("rxx", "reports", { from: a, to: b });
     const line = (t, v, c = "") => `<div class="${c}"><span>${t}</span><b>${v}</b></div>`;
     $("rb").innerHTML = `<div class="kpis"><div class="card kpi"><p>Sales</p><strong>${rwf(R.sales)}</strong><small>${R.receipts} receipts · avg ${rwf(R.avg_receipt)}</small></div><div class="card kpi"><p>Gross profit</p><strong>${rwf(R.gross)}</strong><small>${R.sales ? Math.round((R.gross / R.sales) * 100) : 0}% margin</small></div><div class="card kpi"><p>Expenses</p><strong>${rwf(R.expenses)}</strong></div><div class="card kpi ${R.net >= 0 ? "g" : "r"}"><p>Net profit</p><strong>${rwf(R.net)}</strong></div></div>
     <div class="cols"><div class="card fill"><div class="hd"><h2>Sales and expenses per day</h2></div><div class="chart" id="rc"></div><div class="legend"><span><i style="background:var(--pri)"></i>Sales</span><span><i style="background:var(--cor)"></i>Expenses</span></div></div>
@@ -464,6 +508,9 @@ PAGES.reports = async (el, alive) => {
     <div class="cols even"><div class="card"><div class="hd"><h2>Sales by category</h2></div>${bars(R.by_category)}</div><div class="card"><div class="hd"><h2>Expenses by type</h2></div>${bars(R.exp_by_category, "var(--cor)")}</div></div>
     <div class="cols even"><div class="card"><div class="hd"><h2>Money by payment method</h2></div>${bars(R.by_method, "var(--ind)")}</div><div class="card"><div class="hd"><h2>Sales by staff</h2></div>${bars(R.by_staff, "var(--amb)")}</div></div>
     <div class="card tw"><div class="hd"><h2>Sales by item</h2></div><table><thead><tr><th>Item</th><th class="n">Qty sold</th><th class="n">Sales</th><th class="n">Cost</th><th class="n">Profit</th><th class="n">Margin</th></tr></thead><tbody>${R.by_item.length ? R.by_item.map((i) => `<tr><td><b>${esc(i.name)}</b></td><td class="n">${q(i.qty)}</td><td class="n">${rwf(i.v)}</td><td class="n">${rwf(i.cost)}</td><td class="n"><b>${rwf(i.v - i.cost)}</b></td><td class="n">${i.v ? Math.round(((i.v - i.cost) / i.v) * 100) + "%" : "—"}</td></tr>`).join("") : `<tr><td colspan="6" class="empty">No sales in this period.</td></tr>`}</tbody></table></div>`;
+    $("rb").insertAdjacentHTML("beforeend", `<div class="card" style="margin-top:18px"><div class="hd"><h2>Download one person's activity</h2></div><div class="bd"><p style="margin-top:0" class="hint">Only what that person did — their sales, expenses, stock changes and actions — instead of the whole report.</p><div class="toolbar" style="margin:0">${staffSel("rau")}<button class="btn" id="raub">${icon("down")}Choose period and download</button></div></div></div>`);
+    $("rau").options[0].textContent = "Choose a person…";
+    $("raub").addEventListener("click", () => { const s = $("rau"); if (!s.value) { toast("Choose a person first."); return; } activityModal(s.value, s.options[s.selectedIndex].textContent); });
     const days = [], sd = Object.fromEntries(R.by_day.map((x) => [x.date, x.v])), ed = Object.fromEntries(R.exp_by_day.map((x) => [x.date, x.v]));
     for (let d = a, i = 0; d <= b && i < 120; d = shift(d, 1), i++) days.push({ label: short(d), v: sd[d] || 0, v2: ed[d] || 0 });
     barChart($("rc"), days, { series2: true });
@@ -475,11 +522,12 @@ PAGES.reports = async (el, alive) => {
 PAGES.customers = async (el, alive) => {
   const load = async () => {
     const C = (await api("/api/customers")).customers; if (!alive()) return;
-    el.innerHTML = `<div class="toolbar"><label class="fl grow">Search<input id="cs" placeholder="Name or phone"></label><button class="btn" id="cadd">${icon("plus")}Add customer</button></div><div class="card tw" id="ct"></div><p class="hint">Customers you add here appear in the "Customer" box on New sale. Their visits and spending are counted automatically.</p>`;
+    el.innerHTML = `<div class="toolbar"><label class="fl grow">Search<input id="cs" placeholder="Name or phone"></label>${expBtns("cx")}<button class="btn" id="cadd">${icon("plus")}Add customer</button></div><div class="card tw" id="ct"></div><p class="hint">Customers you add here appear in the "Customer" box on New sale. Their visits and spending are counted automatically.</p>`;
     const draw = () => { const s = $("cs").value.toLowerCase(); const rows = C.filter((c) => !s || c.name.toLowerCase().includes(s) || (c.phone || "").includes(s));
       $("ct").innerHTML = `<table><thead><tr><th>Name</th><th>Phone</th><th class="n">Visits</th><th class="n">Total spent</th><th>Last visit</th><th>Note</th><th></th></tr></thead><tbody>${rows.length ? rows.map((c) => `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.phone || "—")}</td><td class="n">${c.visits}</td><td class="n"><b>${rwf(c.spent)}</b></td><td>${c.last_visit ? esc(short(c.last_visit)) : "—"}</td><td class="mute">${esc(c.note || "")}</td><td><button class="btn sm alt" data-e="${c.id}">Edit</button></td></tr>`).join("") : `<tr><td colspan="7" class="empty">No customers yet.</td></tr>`}</tbody></table>`; };
     const edit = (c) => formModal({ title: c ? "Edit customer" : "Add customer", fields: fld("Name", `<input name="name" required maxlength="60" value="${esc(c?.name || "")}">`, true) + fld("Phone", `<input name="phone" maxlength="30" inputmode="tel" value="${esc(c?.phone || "")}">`) + fld("Note", `<input name="note" maxlength="200" value="${esc(c?.note || "")}">`),
       onSubmit: async (v) => { await api("/api/customers", { method: "POST", body: { ...v, id: c?.id } }); closeModal(); toast("Customer saved"); load(); } });
+    setExp("cx", "customers");
     $("cs").addEventListener("input", draw); $("cadd").addEventListener("click", () => edit(null));
     $("ct").addEventListener("click", (e) => { const b = e.target.closest("[data-e]"); if (b) edit(C.find((c) => c.id === +b.dataset.e)); });
     draw();
@@ -492,23 +540,33 @@ PAGES.users = async (el, alive) => {
   const U = (await api("/api/users")).users; if (!alive()) return;
   pendingUsers = U.filter((u) => u.status === "pending").length; buildNav();
   const pend = U.filter((u) => u.status === "pending"), rest = U.filter((u) => u.status !== "pending");
-  el.innerHTML = `<div id="uw">${pend.length ? `<div class="card" style="margin-bottom:18px"><div class="hd"><h2>Waiting for approval (${pend.length})</h2></div><div class="list">${pend.map((u) => `<div class="row" style="flex-wrap:wrap"><div class="av">${esc(ini(u.name))}</div><div class="m"><b>${esc(u.name)}</b><small>@${esc(u.username)}${u.phone ? " · " + esc(u.phone) : ""} · signed up ${esc(when(u.created_t))}</small></div>
+  el.innerHTML = `<div id="uw"><div class="toolbar"><p class="hint grow" style="margin:0;align-self:center">Add staff accounts yourself, or approve people who signed up on the log-in page.</p>${expBtns("ux")}<button class="btn" id="uadd">${icon("adduser")}Add user</button></div>${pend.length ? `<div class="card" style="margin-bottom:18px"><div class="hd"><h2>Waiting for approval (${pend.length})</h2></div><div class="list">${pend.map((u) => `<div class="row" style="flex-wrap:wrap"><div class="av">${esc(ini(u.name))}</div><div class="m"><b>${esc(u.name)}</b><small>@${esc(u.username)}${u.phone ? " · " + esc(u.phone) : ""} · signed up ${esc(when(u.created_t))}</small></div>
       <select data-role-for="${u.id}" style="width:auto">${opts([["cashier", "Cashier"], ["manager", "Manager"], ["admin", "Administrator"]], "cashier")}</select><button class="btn sm" data-approve="${u.id}">Approve</button><button class="btn sm alt" data-reject="${u.id}">Reject</button></div>`).join("")}</div></div>` : ""}
     <div class="card tw"><div class="hd"><h2>Team</h2></div><table><thead><tr><th>Person</th><th>Role</th><th>Status</th><th>Last login</th><th>Signed in</th><th></th></tr></thead><tbody>
     ${rest.map((u) => { const me = u.id === S.user.id; return `<tr><td><div style="display:flex;gap:10px;align-items:center"><div class="av" style="${u.status === "active" ? "" : "opacity:.4"}">${esc(ini(u.name))}</div><div><b>${esc(u.name)}${me ? " (you)" : ""}</b><br><small class="mute">@${esc(u.username)}${u.phone ? " · " + esc(u.phone) : ""}</small></div></div></td>
       <td>${me ? esc(ROLE[u.role]) : `<select data-role="${u.id}" style="width:auto">${opts([["cashier", "Cashier"], ["manager", "Manager"], ["admin", "Administrator"]], u.role)}</select>`}</td>
       <td>${u.status === "active" ? `<span class="tag t-pri">Active</span>` : `<span class="tag t-cor">Switched off</span>`}${u.must_change ? ` <span class="tag t-amb">Must change password</span>` : ""}</td>
       <td>${esc(when(u.last_login_t))}</td><td>${u.sessions ? `${u.sessions} device${u.sessions > 1 ? "s" : ""}` : "—"}</td>
-      <td style="white-space:nowrap">${me ? "" : `<button class="btn sm alt" data-st="${u.id}|${u.status === "active" ? "disabled" : "active"}">${u.status === "active" ? "Switch off" : "Switch on"}</button> <button class="btn sm alt" data-pw="${u.id}">New password</button> ${u.sessions ? `<button class="btn sm ghost" data-lo="${u.id}">Log out</button>` : ""}`}</td></tr>`; }).join("")}</tbody></table></div>
+      <td style="white-space:nowrap"><button class="btn sm alt" data-act="${u.id}">${icon("down")}Activity</button> ${me ? "" : `<button class="btn sm alt" data-st="${u.id}|${u.status === "active" ? "disabled" : "active"}">${u.status === "active" ? "Switch off" : "Switch on"}</button> <button class="btn sm alt" data-pw="${u.id}">New password</button> ${u.sessions ? `<button class="btn sm ghost" data-lo="${u.id}">Log out</button>` : ""}`}</td></tr>`; }).join("")}</tbody></table></div>
     <div class="card" style="margin-top:18px"><div class="hd"><h2>What each role can do</h2></div><div class="tw"><table><thead><tr><th>Permission</th><th>Cashier</th><th>Manager</th><th>Administrator</th></tr></thead><tbody>
-    ${[["Make sales, print receipts", 1, 1, 1], ["Receive stock, record used / damaged", 1, 1, 1], ["Add expenses, view day book", 1, 1, 1], ["Customers", 1, 1, 1], ["See cost prices & profit, reports, Excel export", 0, 1, 1], ["Add / edit items and prices", 0, 1, 1], ["Cancel sales, expenses, stock changes; stock count", 0, 1, 1], ["Change prices at the till", 0, 1, 1], ["Users & roles, audit log, settings, backup", 0, 0, 1]].map(([t, ...r]) => `<tr><td>${t}</td>${r.map((x) => `<td>${x ? '<span class="ok">✓</span>' : '<span class="mute">—</span>'}</td>`).join("")}</tr>`).join("")}</tbody></table></div></div></div>`;
-  const uw = $("uw");
+    ${[["Make sales, print receipts", 1, 1, 1], ["Receive stock, record used / damaged", 1, 1, 1], ["Add expenses, view day book", 1, 1, 1], ["Customers", 1, 1, 1], ["Download Excel / PDF of the pages they can see", 1, 1, 1], ["Sell custom items (not in the item list)", 1, 1, 1], ["See cost prices & profit, money report", 0, 1, 1], ["Add / edit items and prices", 0, 1, 1], ["Cancel sales, expenses, stock changes; stock count", 0, 1, 1], ["Change prices at the till", 0, 1, 1], ["Add users, approve accounts, roles, audit log, settings, backup", 0, 0, 1]].map(([t, ...r]) => `<tr><td>${t}</td>${r.map((x) => `<td>${x ? '<span class="ok">✓</span>' : '<span class="mute">—</span>'}</td>`).join("")}</tr>`).join("")}</tbody></table></div></div></div>`;
+  const uw = $("uw"); setExp("ux", "users");
+  $("uadd").addEventListener("click", () => formModal({ title: "Add a user account", submit: "Create account",
+    fields: fld("Full name", `<input name="name" required maxlength="60" autocomplete="off">`, true) +
+      fld("Username (no spaces)", `<input name="username" required pattern="[a-zA-Z0-9._\\-]{3,30}" title="No spaces, e.g. eric" placeholder="e.g. eric" autocapitalize="none" spellcheck="false" autocomplete="off">`) +
+      fld("Phone", `<input name="phone" inputmode="tel" maxlength="30" autocomplete="off">`) +
+      fld("Role", `<select name="role">${opts([["cashier", "Cashier — sells, stock in, expenses"], ["manager", "Manager — also items, prices, reports"], ["admin", "Administrator — everything"]], "cashier")}</select>`, true) +
+      fld("Temporary password (at least 8 characters)", `<input name="password" required minlength="8" autocomplete="new-password">`, true) +
+      `<label class="w" style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" name="must_change" value="1" checked style="width:20px;min-height:20px"> Ask them to choose their own password the first time they log in (recommended)</label>`,
+    note: `<p class="hint">The account is active straight away. Give the username and temporary password to the person privately.</p>`,
+    onSubmit: async (v) => { v.must_change = v.must_change === "1"; await api("/api/users", { method: "POST", body: v }); closeModal(); toast(`Account created for ${v.name}`); go("users", true); } }));
   const act = async (fn, msg) => { try { await fn(); toast(msg); go("users", true); } catch (e) { toast(e.message); } };
   uw.addEventListener("click", (e) => {
     const t = e.target;
     if (t.dataset.approve) { const role = uw.querySelector(`[data-role-for="${t.dataset.approve}"]`).value; act(async () => { await api(`/api/users/${t.dataset.approve}`, { method: "POST", body: { status: "active", role } }); }, "Approved"); }
     if (t.dataset.reject) act(() => api(`/api/users/${t.dataset.reject}`, { method: "POST", body: { status: "disabled" } }), "Rejected");
     if (t.dataset.st) { const [id, st] = t.dataset.st.split("|"); act(() => api(`/api/users/${id}`, { method: "POST", body: { status: st } }), st === "active" ? "Switched on" : "Switched off"); }
+    const ab = t.closest("[data-act]"); if (ab) { const u = U.find((x) => x.id === +ab.dataset.act); activityModal(u.id, u.name); return; }
     if (t.dataset.lo) act(() => api(`/api/users/${t.dataset.lo}/logout`, { method: "POST" }), "Logged out on all devices");
     if (t.dataset.pw) { const u = U.find((x) => x.id === +t.dataset.pw); formModal({ title: `New password for ${esc(u.name)}`, submit: "Set password",
       fields: fld("Temporary password", `<input name="password" required minlength="8" autocomplete="off">`, true), note: `<p class="hint">At least 8 characters. Give it to ${esc(u.name)} in person — they must choose their own password when they next log in.</p>`,
@@ -519,10 +577,12 @@ PAGES.users = async (el, alive) => {
 
 /* ---------- Audit log ---------- */
 PAGES.audit = async (el, alive) => {
-  el.innerHTML = `<div class="toolbar"><label class="fl">Show<select id="af">${opts([["", "Everything"], ["login", "Log-ins (incl. failed)"], ["sale", "Sales"], ["stock", "Stock"], ["item", "Items & prices"], ["expense", "Expenses"], ["user", "Users"], ["account", "New accounts"], ["password", "Passwords"], ["settings", "Settings"], ["export", "Exports"], ["backup", "Backups"]])}</select></label><span class="hint grow" style="align-self:center">Every action is recorded with the person, time and device address. Entries cannot be edited or deleted.</span></div><div class="card tw" id="at"></div><div style="text-align:center;margin-top:12px"><button class="btn alt" id="am">Load older</button></div>`;
+  el.innerHTML = rangeBar("ar", "month", `<span style="flex:1"></span>${expBtns("ax")}`) + `<div class="toolbar"><label class="fl">Show<select id="af">${opts([["", "Everything"], ["login", "Log-ins (incl. failed)"], ["sale", "Sales"], ["stock", "Stock"], ["item", "Items & prices"], ["expense", "Expenses"], ["user", "Users"], ["account", "New accounts"], ["password", "Passwords"], ["settings", "Settings"], ["export", "Exports"], ["backup", "Backups"]])}</select></label><span class="hint grow" style="align-self:center">Every action is recorded with the person, time and device address. Entries cannot be edited or deleted.</span></div><div class="card tw" id="at"></div><div style="text-align:center;margin-top:12px"><button class="btn alt" id="am">Load older</button></div>`;
   let rows = [];
-  const load = async (more) => { const before = more && rows.length ? rows[rows.length - 1].t : ""; const r = (await api(`/api/audit?action=${encodeURIComponent($("af").value)}&before=${before}`)).rows; if (!alive()) return; rows = more ? rows.concat(r) : r; $("am").hidden = r.length < 200;
+  let span = range("month");
+  const load = async (more) => { setExp("ax", "audit", { from: span[0], to: span[1] }); const before = more && rows.length ? rows[rows.length - 1].t : ""; const r = (await api(`/api/audit?action=${encodeURIComponent($("af").value)}&before=${before}&from=${span[0]}&to=${span[1]}`)).rows; if (!alive()) return; rows = more ? rows.concat(r) : r; $("am").hidden = r.length < 200;
     $("at").innerHTML = `<table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Details</th><th>Device IP</th></tr></thead><tbody>${rows.length ? rows.map((a) => `<tr><td style="white-space:nowrap">${esc(when(a.t))}</td><td>${esc(a.name || "—")}</td><td><span class="tag ${a.action.includes("failed") || a.action.includes("void") ? "t-cor" : a.action.startsWith("login") ? "t-ind" : "t-mute"}">${esc(a.action)}</span></td><td>${esc(a.detail)}</td><td class="mute">${esc(a.ip)}</td></tr>`).join("") : `<tr><td colspan="5" class="empty">Nothing recorded.</td></tr>`}</tbody></table>`; };
+  bindRange("ar", (x, y) => { span = [x, y]; load(false); });
   $("af").addEventListener("change", () => load(false)); $("am").addEventListener("click", () => load(true));
   await load(false);
 };
@@ -538,15 +598,18 @@ PAGES.settings = async (el, alive) => {
     ${fld("Expense types (comma separated)", `<textarea name="expense_categories">${esc(s.expense_categories)}</textarea>`, true)}
     ${fld("Payment methods (comma separated)", `<textarea name="payment_methods">${esc(s.payment_methods)}</textarea>`, true)}
     ${fld("Auto log-out after no activity (minutes)", `<input name="idle_minutes" inputmode="numeric" value="${esc(s.idle_minutes)}">`)}
-    <label class="fl" style="flex-direction:row;display:flex;gap:8px;align-items:center"><input type="checkbox" name="allow_negative_stock" value="1" ${s.allow_negative_stock === "1" ? "checked" : ""} style="width:20px;min-height:20px">Allow selling more than the stock shows</label>
+    ${fld("Automatic daily backups to keep", `<input name="auto_backup_keep" inputmode="numeric" value="${esc(s.auto_backup_keep)}">`)}
+    <label class="fl w" style="flex-direction:row;display:flex;gap:8px;align-items:center"><input type="checkbox" name="allow_negative_stock" value="1" ${s.allow_negative_stock === "1" ? "checked" : ""} style="width:20px;min-height:20px">Allow selling more than the stock shows</label>
+    <label class="fl w" style="flex-direction:row;display:flex;gap:8px;align-items:center"><input type="checkbox" name="allow_custom_items" value="1" ${s.allow_custom_items === "1" ? "checked" : ""} style="width:20px;min-height:20px">Allow custom items on New sale (items not in the item list)</label>
     <div class="w"><button class="btn" type="submit">Save settings</button> <span class="err" id="serr"></span></div></form></div>
     <div><div class="card" style="margin-bottom:18px"><div class="hd"><h2>Backup</h2></div><div class="bd"><p style="margin-top:0">Download a full copy of the database (all sales, stock, expenses, users). Keep it on a USB stick or Google Drive. Do this at least once a week.</p><a class="btn" href="/api/backup">${icon("down")}Download backup</a>
-      <p class="hint">To restore: stop the app, replace <code>data/grathia.db</code> with the backup file (rename it to grathia.db), start the app.</p></div></div>
+      <p class="hint" id="binfo"></p><p class="hint">To restore: stop the app, replace <code>data/grathia.db</code> with the backup file (rename it to grathia.db), start the app.</p></div></div>
     <div class="card"><div class="hd"><h2>Security in this system</h2></div><div class="bd"><ul style="margin:0;padding-left:18px;display:grid;gap:6px">
       <li>Passwords are stored only as salted scrypt hashes — nobody can read them, not even an administrator.</li><li>5 wrong passwords lock that username and device for 15 minutes.</li>
       <li>Sessions end after ${esc(s.idle_minutes)} minutes of no activity, and after 7 days at most.</li><li>New accounts need approval; roles limit what each person can see and do — checked on the server.</li>
       <li>Every action is saved in the audit log. Sales and expenses are never deleted, only cancelled with a reason.</li><li>Protection against cross-site request forgery, click-jacking and script injection.</li></ul></div></div></div></div>`;
-  $("sf").addEventListener("submit", async (e) => { e.preventDefault(); const v = Object.fromEntries(new FormData(e.target)); v.allow_negative_stock = v.allow_negative_stock === "1" ? "1" : "0";
+  api("/api/backup/info").then((b) => { if ($("binfo")) $("binfo").innerHTML = `<b>Automatic backups:</b> ${b.count} saved${b.latest ? ` (latest: ${esc(b.latest)})` : ""} in <code>${esc(b.folder)}</code>. A new one is made every day while the app is running.`; }).catch(() => {});
+  $("sf").addEventListener("submit", async (e) => { e.preventDefault(); const v = Object.fromEntries(new FormData(e.target)); v.allow_negative_stock = v.allow_negative_stock === "1" ? "1" : "0"; v.allow_custom_items = v.allow_custom_items === "1" ? "1" : "0";
     try { await api("/api/settings", { method: "PUT", body: v }); toast("Settings saved"); await loadMe(); buildNav(); } catch (x) { $("serr").textContent = x.message; } });
 };
 
@@ -554,7 +617,9 @@ PAGES.settings = async (el, alive) => {
 PAGES.account = async (el) => {
   el.innerHTML = `<div class="cols even"><div class="card"><div class="hd"><h2>My details</h2></div><div class="bd"><div style="display:flex;gap:14px;align-items:center"><div class="av" style="width:56px;height:56px;font-size:20px">${esc(ini(S.user.name))}</div><div><b style="font-size:18px">${esc(S.user.name)}</b><br><span class="mute">@${esc(S.user.username)} · ${esc(ROLE[S.user.role])}</span></div></div>
     <h3 style="font-size:14px;margin:18px 0 8px">What I can do</h3><div class="chips">${S.perms.map((p) => `<span class="tag t-mute">${esc(p)}</span>`).join("")}</div></div></div>
-    <div class="card"><div class="hd"><h2>Change my password</h2></div><form class="bd" id="pf" style="display:grid;gap:12px">${pwFields()}<button class="btn" type="submit">Change password</button><p class="err" id="perr2"></p></form></div></div>`;
+    <div class="card"><div class="hd"><h2>Change my password</h2></div><form class="bd" id="pf" style="display:grid;gap:12px">${pwFields()}<button class="btn" type="submit">Change password</button><p class="err" id="perr2"></p></form></div></div>
+    <div class="card" style="margin-top:18px"><div class="hd"><h2>Download my activity</h2></div><div class="bd"><p style="margin-top:0">Only your own work: the sales you made, expenses and stock changes you recorded, and your log-ins — for the period you choose.</p>${rangeBar("myr", "month", `<span style="flex:1"></span>${expBtns("myx")}`)}</div></div>`;
+  { const set = (f, t) => setExp("myx", "activity", { from: f, to: t }); const get = bindRange("myr", set); set(...get()); }
   bindPw($("pf"), async (v) => { await api("/api/auth/password", { method: "POST", body: v }); toast("Password changed. Other devices were logged out."); $("pf").reset(); }, $("perr2"));
 };
 function pwFields() { return `<label class="fl">Current password<input type="password" name="current" required autocomplete="current-password"></label><label class="fl">New password<input type="password" name="next" required minlength="8" autocomplete="new-password"></label><div class="pwm"><i></i></div><label class="fl">Repeat new password<input type="password" name="next2" required minlength="8" autocomplete="new-password"></label><span class="hint">Password: at least 8 characters.</span>`; }
@@ -570,7 +635,7 @@ function bindPw(form, submit, err) {
 /* =================== login, sign-up, forced password change =================== */
 function showAuth(mode, msg = "") {
   $("shell").hidden = true; $("auth").hidden = false; closeModal();
-  const art = `<div class="art"><div class="brand" style="padding:0"><svg viewBox="0 0 40 40"><rect width="40" height="40" rx="11" fill="#fff" fill-opacity=".15"/><path d="M9 22h22v9H9z" fill="#fff"/><path d="M11 22v-4h18v4" fill="#ffd27a"/><path d="M15 18v-4M20 18v-5M25 18v-4" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg><div>${esc(S.shop.name || "Grathia Sweet Haven")}<small style="color:#cfe6e4">${esc(S.shop.tagline || "")}</small></div></div>
+  const art = `<div class="art"><div class="brand" style="padding:0"><img src="brand/logo-192.png" alt="Grathia Sweet Haven logo" class="logo"><div>${esc(S.shop.name || "Grathia Sweet Haven")}<small style="color:#cfe6e4">${esc(S.shop.tagline || "")}</small></div></div>
     <div><h2>Sales, stock and money — in one secure place.</h2><p>Record every sale and expense, know what's on your shelves, and see your real profit every day.</p>
     <ul><li>Point of sale with printed receipts</li><li>Live stock levels and low-stock alerts</li><li>Daily day book and profit reports</li><li>Staff accounts with approval and roles</li><li>Full audit trail of every action</li></ul></div><small style="color:#9cc5c1">${esc(S.shop.address || "")}</small></div>`;
   let form = "";

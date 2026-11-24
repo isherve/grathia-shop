@@ -173,3 +173,8 @@ td.n,th.n{text-align:end;white-space:nowrap;font-variant-numeric:tabular-nums}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 .card.fill{display:flex;flex-direction:column}.card.fill .chart{flex:1;min-height:240px}
+.exp{display:inline-flex;gap:6px}.exp .btn{min-height:42px}
+.tag.custom{background:var(--ambSoft);color:var(--amb);font-size:10.5px;padding:1px 7px;margin-inline-start:6px}
+.brand img.logo{width:46px;height:46px;border-radius:50%;flex:none;background:#fff7ea;box-shadow:0 0 0 2px rgba(255,210,122,.35)}
+.auth .art .brand img.logo{width:84px;height:84px}
+.receipt img.logo{display:block;width:92px;height:92px;margin:0 auto 6px}

@@ -6,13 +6,15 @@
   "private": true,
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.js",
-    "dev": "node --disable-warning=ExperimentalWarning --watch server.js"
+    "dev": "node --disable-warning=ExperimentalWarning --watch server.js",
+    "admin": "node --disable-warning=ExperimentalWarning admin-tool.js"
   },
   "engines": {
     "node": ">=22.13.0"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "pdfkit": "^0.15.2"
   }
 }

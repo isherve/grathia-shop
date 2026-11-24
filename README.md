@@ -53,19 +53,46 @@ Or press **F5** in VS Code. To stop: click the terminal and press **Ctrl + C**.
 | **Audit log** | Every action: who, what, when, from which device. Cannot be edited. |
 | **Settings & backup** | Shop details, lists, auto log-out time, **download a full backup** |
 
-## 5. Roles
+## 5. New in this version
+
+- **Excel and PDF on every page.** Sales, Items, Inventory (levels and movements), Expenses, Day book, Reports,
+  Customers, Users and Audit log each have **Excel** and **PDF** buttons. They download exactly the period you have chosen.
+  Every receipt also has a **PDF** button (receipt-printer size).
+- **Custom items on New sale.** Tap **Custom item** to sell something that is not in the item list (e.g. a special-order cake):
+  type the name, price and quantity. Managers can tick *Also save it to the item list*. Custom items do not change stock and
+  are recorded in the audit log. Administrators can switch this off in Settings.
+- **Administrators can create accounts.** Users & roles → **Add user**: name, username, role and a temporary password.
+  The person must choose their own password at first login.
+- **Automatic daily backups** in `data/backups` (the newest 30 are kept; change the number in Settings).
+- **Emergency tool in the terminal** (works only on the shop computer):
+  ```
+  npm run admin -- list                         show all accounts
+  npm run admin -- reset-password grace         set a new temporary password for "grace"
+  npm run admin -- make-admin eric              make "eric" an administrator
+  npm run admin -- unlock eric                  switch "eric"'s account back on
+  ```
+
+- **Your logo everywhere**: browser tab icon, sidebar, log-in page, printed and PDF receipts, every PDF and Excel download.
+  To change it, replace the images in `public/brand/` (keep the same file names).
+- **Download one person's activity** (without the whole report):
+  everyone → **My account → Download my activity**; managers → **Reports → Download one person's activity**;
+  administrators → **Users & roles → Activity**. Sales, Expenses and Inventory movements also have a
+  **Recorded by** filter, and their Excel / PDF buttons follow it.
+
+## 6. Roles
 
 | | Cashier | Manager | Administrator |
 |---|:-:|:-:|:-:|
 | Sales, receipts, stock in, losses, expenses, day book, customers | ✓ | ✓ | ✓ |
+| Excel / PDF downloads of the pages they can see, custom items at the till | ✓ | ✓ | ✓ |
 | Cost prices, profit, reports, Excel export | | ✓ | ✓ |
 | Add / edit items and prices, change price at the till | | ✓ | ✓ |
 | Cancel sales / expenses / stock changes, stock count | | ✓ | ✓ |
-| Users, audit log, settings, backup | | | ✓ |
+| Add users, approve accounts, audit log, settings, backup | | | ✓ |
 
 New staff click **Create account**; an administrator approves them in **Users & roles** and chooses their role.
 
-## 6. Security features
+## 7. Security features
 
 - **Passwords** stored only as salted **scrypt** hashes. Minimum 8 characters (and not the same as the username).
 - **Lock-out**: 5 wrong passwords → that username and device are blocked for 15 minutes.
@@ -81,7 +108,7 @@ New staff click **Create account**; an administrator approves them in **Users & 
 - **At least one active administrator** is always kept.
 - All database queries use parameters (no SQL injection). All text shown on screen is escaped (no script injection).
 
-## 7. Using it on phones in the shop
+## 8. Using it on phones in the shop
 
 The terminal shows `On phones (same Wi-Fi): http://192.168.x.x:3000`. Phones on the **same Wi-Fi** can open that.
 The computer must stay on. If Windows asks about the firewall, allow **Private networks** only.
@@ -89,33 +116,38 @@ The computer must stay on. If Windows asks about the firewall, allow **Private n
 > **Do not put this on the public internet as it is.** For access from outside the shop, it must run behind
 > HTTPS (for example a reverse proxy such as Caddy or Nginx, with `TRUST_PROXY=1`). Ask a technical person.
 
-## 8. Backups
+## 9. Backups
 
 - All data is in **`data/grathia.db`**.
 - **Settings & backup → Download backup** saves a complete copy. Do it weekly; keep it on a USB stick or Google Drive.
 - **Restore**: stop the app, replace `data/grathia.db` with your backup file (renamed to `grathia.db`), start again.
 
-## 9. Folder contents
+## 10. Folder contents
 
 ```
 grathia-shop/
 ├── server.js        secure server: login, roles, sales, stock, reports, audit, backup
+├── exports.js       Excel and PDF downloads for every page, receipt PDF
+├── admin-tool.js    emergency terminal tool (npm run admin)
 ├── db.js            database tables + starting items
-├── package.json     app settings (uses 2 libraries: express, exceljs)
+├── package.json     app settings (uses 3 libraries: express, exceljs, pdfkit)
 ├── public/
 │   ├── index.html   page shell with the sidebar
 │   ├── app.js       all screens
 │   ├── app.css      design, light + dark mode
 │   ├── theme.js     remembers light/dark choice
-│   └── favicon.svg
+│   └── brand/       your logo in several sizes (icon, receipts, PDFs)
 ├── .vscode/         press F5 to run
 └── data/            your database (created on first start, not in the zip)
 ```
 
-## 10. Problems?
+## 11. Problems?
 
 - **"needs Node.js 22.13 or newer"** → install the latest LTS from nodejs.org, then restart VS Code.
 - **`npm` is not recognised** → restart VS Code after installing Node.js.
 - **Port 3000 in use** → it's already running in another terminal. Or on Windows: `set PORT=3001` then `npm start`.
 - **"Too many wrong attempts"** → wait 15 minutes, or an administrator sets a new password (this also unlocks the username).
-- **Lost the only admin password** → there is no back door (that's the security). Restore a backup, or delete `data/grathia.db` to start again from zero.
+- **Lost the only admin password** → on the shop computer run `npm run admin -- reset-password <your username>`.
+  Only someone with access to this computer can do this.
+- **The folder is inside OneDrive** → move it to a normal folder such as `C:\grathia-shop`. OneDrive syncing the
+  database while the app writes to it can damage it.

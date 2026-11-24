@@ -86,7 +86,7 @@ CREATE INDEX IF NOT EXISTS sales_date ON sales(date);
 CREATE TABLE IF NOT EXISTS sale_items (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   sale_id    INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
-  product_id INTEGER NOT NULL REFERENCES products(id),
+  product_id INTEGER REFERENCES products(id),     -- NULL = custom item typed at the till
   name       TEXT NOT NULL,
   qty        REAL NOT NULL,
   price      REAL NOT NULL,
@@ -146,6 +146,21 @@ CREATE TABLE IF NOT EXISTS audit (
 CREATE INDEX IF NOT EXISTS audit_t ON audit(t);
 `);
 
+// Upgrade older databases: allow custom (unlisted) items on sale lines.
+{
+  const col = db.prepare("PRAGMA table_info(sale_items)").all().find((c) => c.name === "product_id");
+  if (col && col.notnull) {
+    db.exec(`PRAGMA foreign_keys = OFF; BEGIN;
+      CREATE TABLE sale_items_new (id INTEGER PRIMARY KEY AUTOINCREMENT, sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+        product_id INTEGER REFERENCES products(id), name TEXT NOT NULL, qty REAL NOT NULL, price REAL NOT NULL, cost REAL NOT NULL, line_total REAL NOT NULL);
+      INSERT INTO sale_items_new (id, sale_id, product_id, name, qty, price, cost, line_total) SELECT id, sale_id, product_id, name, qty, price, cost, line_total FROM sale_items;
+      DROP TABLE sale_items; ALTER TABLE sale_items_new RENAME TO sale_items;
+      CREATE INDEX IF NOT EXISTS sale_items_sale ON sale_items(sale_id);
+      COMMIT; PRAGMA foreign_keys = ON;`);
+    console.log("  Database upgraded (custom sale items).");
+  }
+}
+
 const DEFAULT_SETTINGS = {
   shop_name: "Grathia Sweet Haven",
   shop_tagline: "Bakery & Fresh Juice",
@@ -155,6 +170,8 @@ const DEFAULT_SETTINGS = {
   currency: "RWF",
   idle_minutes: "30",
   allow_negative_stock: "1",
+  allow_custom_items: "1",
+  auto_backup_keep: "30",
   expense_categories: "Rent,Salaries & wages,Electricity,Water,Gas / charcoal,Transport,Packaging,Marketing,Airtime & internet,Repairs,Taxes & fees,Other",
   payment_methods: "Cash,MTN MoMo,Airtel Money,Bank card,Bank transfer",
   categories: "Fresh Juice,Birthday Cakes,Wedding Cakes,Graduation Cakes,Cupcakes & Pastries,Snacks,Baking Supplies,Ingredients",
@@ -162,8 +179,10 @@ const DEFAULT_SETTINGS = {
 const putSetting = db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)");
 for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) putSetting.run(k, v);
 
-// First start: the shop's starting items and the first recorded sale (from the Excel file).
-if (db.prepare("SELECT COUNT(*) AS n FROM products").get().n === 0) {
+// First start only: the shop's starting items and the first recorded sale (from the Excel file).
+// A marker makes sure they are never added again (for example after "npm run admin -- reset-data").
+const seedDone = db.prepare("SELECT value FROM settings WHERE key = 'seed_done'").get();
+if (!seedDone && db.prepare("SELECT COUNT(*) AS n FROM products").get().n === 0) {
   const t = Date.now();
   const addP = db.prepare("INSERT INTO products (sku, name, category, unit, cost, price, reorder, sellable, created_t) VALUES (?,?,?,?,?,?,?,?,?)");
   const addM = db.prepare("INSERT INTO stock_moves (date, t, product_id, type, qty, unit_cost, note) VALUES (?,?,?,?,?,?,?)");
@@ -177,5 +196,6 @@ if (db.prepare("SELECT COUNT(*) AS n FROM products").get().n === 0) {
   db.prepare("INSERT INTO sale_items (sale_id, product_id, name, qty, price, cost, line_total) VALUES (?,?,?,?,?,?,?)").run(sale, mandazi, "Special mandazi", 8, 100, 0, 800);
   console.log("  New database created with starting items.");
 }
+if (!seedDone) db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('seed_done', '1')").run();
 
 module.exports = { db, DB_FILE, DATA_DIR };

@@ -228,6 +228,7 @@ app.get("/api/bootstrap", auth, (req, res) => {
     names: userNames(),
     lists: { categories: list(s.categories), expense_categories: list(s.expense_categories), payment_methods: list(s.payment_methods) },
     allow_negative: s.allow_negative_stock === "1",
+    allow_custom: s.allow_custom_items === "1",
   });
 });
 
@@ -244,7 +245,7 @@ app.get("/api/dashboard", auth, (req, res) => {
   const byDay = Object.fromEntries(series.map((r) => [r.date, r.v]));
   const days = []; for (let i = 13; i >= 0; i--) { const d = localDate(new Date(Date.now() - i * 864e5)); days.push({ date: d, sales: byDay[d] || 0 }); }
   const top = db.prepare(`SELECT si.name, SUM(si.qty) q, SUM(si.line_total) v FROM sale_items si JOIN sales s ON s.id=si.sale_id
-    WHERE s.voided=0 AND s.date BETWEEN ? AND ? GROUP BY si.product_id ORDER BY v DESC LIMIT 5`).all(d30, today);
+    WHERE s.voided=0 AND s.date BETWEEN ? AND ? GROUP BY COALESCE(si.product_id, 'c:' || si.name) ORDER BY v DESC LIMIT 5`).all(d30, today);
   const low = stockLevels().filter((p) => !p.archived && (p.status === "low" || p.status === "check")).map((p) => ({ id: p.id, name: p.name, unit: p.unit, on_hand: p.on_hand, reorder: p.reorder }));
   const out = {
     today: { sales: salesBetween(today, today), receipts: sum("SELECT COUNT(*) v FROM sales WHERE voided=0 AND date=?", today), expenses: expBetween(today, today) },
@@ -271,6 +272,14 @@ app.post("/api/sales", auth, need("sell"), wrap((req, res) => {
   if (!Array.isArray(b.items) || !b.items.length || b.items.length > 100) bad("The cart is empty.");
   const levels = Object.fromEntries(stockLevels().map((p) => [p.id, p]));
   const lines = b.items.map((it) => {
+    if (it.custom) {
+      if (s.allow_custom_items !== "1") bad("Custom items are switched off in Settings.");
+      const name = str(it.name, 80); if (!name) bad("Give the custom item a name.");
+      const qty = num(it.qty); if (qty <= 0 || qty > 100000) bad(`Check the quantity for ${name}.`);
+      const price = money(it.price); if (price < 0) bad("Price cannot be negative.");
+      const cost = can(req.user, "costs.view") ? Math.max(0, money(it.cost)) : 0;
+      return { p: { id: null, name }, qty, price, cost, line: money(qty * price), custom: true };
+    }
     const p = levels[num(it.product_id)]; if (!p || p.archived || !p.sellable) bad("An item in the cart is not for sale.");
     const qty = num(it.qty); if (qty <= 0 || qty > 100000) bad(`Check the quantity for ${p.name}.`);
     let price = p.price; if (it.price != null && money(it.price) !== p.price) { if (!can(req.user, "price.override")) bad("Only a manager can change prices."); price = money(it.price); }
@@ -278,7 +287,7 @@ app.post("/api/sales", auth, need("sell"), wrap((req, res) => {
     return { p, qty, price, cost: p.cost, line: money(qty * price) };
   });
   if (s.allow_negative_stock !== "1") {
-    const need = {}; for (const l of lines) need[l.p.id] = (need[l.p.id] || 0) + l.qty;
+    const need = {}; for (const l of lines) if (!l.custom) need[l.p.id] = (need[l.p.id] || 0) + l.qty;
     for (const [id, q] of Object.entries(need)) if (levels[id].on_hand < q) bad(`Not enough ${levels[id].name} in stock (only ${levels[id].on_hand}).`);
   }
   const subtotal = money(lines.reduce((a, l) => a + l.line, 0));
@@ -295,7 +304,8 @@ app.post("/api/sales", auth, need("sell"), wrap((req, res) => {
     for (const l of lines) ins.run(id, l.p.id, l.p.name, l.qty, l.price, l.cost, l.line);
     return { id, receipt };
   });
-  audit(req, "sale.created", `${sale.receipt} total ${money(subtotal - discount)}`);
+  const customs = lines.filter((l) => l.custom).map((l) => `${l.p.name} @ ${l.price}`);
+  audit(req, "sale.created", `${sale.receipt} total ${money(subtotal - discount)}${customs.length ? " — custom: " + customs.join(", ") : ""}`);
   res.json({ ok: true, sale: getSale(sale.id, req.user) });
 }));
 
@@ -307,8 +317,9 @@ function getSale(id, user) {
 }
 app.get("/api/sales", auth, need("sales.view"), (req, res) => {
   const from = isDate(req.query.from) ? req.query.from : localDate(), to = isDate(req.query.to) ? req.query.to : from;
-  const sales = db.prepare("SELECT * FROM sales WHERE date BETWEEN ? AND ? ORDER BY t DESC LIMIT 2000").all(from, to);
-  const items = db.prepare(`SELECT si.* FROM sale_items si JOIN sales s ON s.id = si.sale_id WHERE s.date BETWEEN ? AND ?`).all(from, to);
+  const uf = num(req.query.user) ? ` AND user_id = ${num(req.query.user) | 0}` : "";
+  const sales = db.prepare("SELECT * FROM sales WHERE date BETWEEN ? AND ?" + uf + " ORDER BY t DESC LIMIT 2000").all(from, to);
+  const items = db.prepare(`SELECT si.* FROM sale_items si JOIN sales s ON s.id = si.sale_id WHERE s.date BETWEEN ? AND ?` + uf.replace("user_id", "s.user_id")).all(from, to);
   const by = {}; for (const i of items) { if (!can(req.user, "costs.view")) delete i.cost; (by[i.sale_id] ||= []).push(i); }
   res.json({ sales: sales.map((s) => ({ ...s, items: by[s.id] || [] })) });
 });
@@ -373,7 +384,7 @@ app.get("/api/moves", auth, need("stock.view"), (req, res) => {
   const from = isDate(req.query.from) ? req.query.from : "0000-01-01", to = isDate(req.query.to) ? req.query.to : "9999-12-31";
   const pid = num(req.query.product_id);
   const rows = db.prepare(`SELECT m.*, p.name, p.unit FROM stock_moves m JOIN products p ON p.id = m.product_id
-    WHERE m.date BETWEEN ? AND ? ${pid ? "AND m.product_id = " + pid : ""} ORDER BY m.date DESC, m.t DESC LIMIT 2000`).all(from, to);
+    WHERE m.date BETWEEN ? AND ? ${pid ? "AND m.product_id = " + pid : ""} ${num(req.query.user) ? "AND m.user_id = " + (num(req.query.user) | 0) : ""} ORDER BY m.date DESC, m.t DESC LIMIT 2000`).all(from, to);
   if (!can(req.user, "costs.view")) rows.forEach((r) => delete r.unit_cost);
   res.json({ moves: rows });
 });
@@ -408,7 +419,8 @@ app.post("/api/moves/:id/void", auth, need("stock.void"), wrap((req, res) => {
 // ======================================================================
 app.get("/api/expenses", auth, need("expense.view"), (req, res) => {
   const from = isDate(req.query.from) ? req.query.from : localDate(), to = isDate(req.query.to) ? req.query.to : from;
-  res.json({ expenses: db.prepare("SELECT * FROM expenses WHERE date BETWEEN ? AND ? ORDER BY date DESC, t DESC LIMIT 2000").all(from, to) });
+  const uf = num(req.query.user) ? ` AND user_id = ${num(req.query.user) | 0}` : "";
+  res.json({ expenses: db.prepare("SELECT * FROM expenses WHERE date BETWEEN ? AND ?" + uf + " ORDER BY date DESC, t DESC LIMIT 2000").all(from, to) });
 });
 app.post("/api/expenses", auth, need("expense.add"), wrap((req, res) => {
   const b = req.body || {}, s = settings();
@@ -478,9 +490,9 @@ function report(from, to) {
     by_day: q("SELECT date, SUM(total) v, COUNT(*) n FROM sales WHERE voided=0 AND date BETWEEN ? AND ? GROUP BY date ORDER BY date"),
     exp_by_day: q("SELECT date, SUM(amount) v FROM expenses WHERE voided=0 AND date BETWEEN ? AND ? GROUP BY date"),
     by_item: q(`SELECT si.name, SUM(si.qty) qty, SUM(si.line_total) v, SUM(si.qty*si.cost) cost FROM sale_items si JOIN sales s ON s.id=si.sale_id
-      WHERE s.voided=0 AND s.date BETWEEN ? AND ? GROUP BY si.product_id ORDER BY v DESC`),
-    by_category: q(`SELECT p.category name, SUM(si.line_total) v FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
-      WHERE s.voided=0 AND s.date BETWEEN ? AND ? GROUP BY p.category ORDER BY v DESC`),
+      WHERE s.voided=0 AND s.date BETWEEN ? AND ? GROUP BY COALESCE(si.product_id, 'c:' || si.name) ORDER BY v DESC`),
+    by_category: q(`SELECT COALESCE(p.category, 'Custom items') name, SUM(si.line_total) v FROM sale_items si JOIN sales s ON s.id=si.sale_id LEFT JOIN products p ON p.id=si.product_id
+      WHERE s.voided=0 AND s.date BETWEEN ? AND ? GROUP BY 1 ORDER BY v DESC`),
     by_method: q("SELECT method name, SUM(total) v, COUNT(*) n FROM sales WHERE voided=0 AND date BETWEEN ? AND ? GROUP BY method ORDER BY v DESC"),
     by_staff: q(`SELECT COALESCE(u.name,'(imported)') name, SUM(s.total) v, COUNT(*) n FROM sales s LEFT JOIN users u ON u.id=s.user_id
       WHERE s.voided=0 AND s.date BETWEEN ? AND ? GROUP BY s.user_id ORDER BY v DESC`),
@@ -538,6 +550,21 @@ app.get("/api/users", auth, need("users"), (req, res) => {
   res.json({ users: db.prepare("SELECT id, name, username, phone, role, status, must_change, created_t, last_login_t FROM users ORDER BY status = 'pending' DESC, name").all()
     .map((u) => ({ ...u, sessions: active[u.id]?.n || 0, last_seen_t: active[u.id]?.seen || null })) });
 });
+// Administrator creates an account directly (active at once; must change the temporary password at first login).
+app.post("/api/users", auth, need("users"), wrap((req, res) => {
+  const b = req.body || {}, name = str(b.name, 60), username = str(b.username, 30).toLowerCase(), phone = str(b.phone, 30);
+  const role = ["admin", "manager", "cashier"].includes(b.role) ? b.role : bad("Choose a role.");
+  if (!name) bad("Enter the person's full name.");
+  if (!/^[a-z0-9._-]{3,30}$/.test(username)) bad("Username must have no spaces — for example: eric or eric.m (letters, numbers, dots or dashes).");
+  const p = passwordProblem(b.password, username); if (p) bad(p);
+  if (db.prepare("SELECT 1 FROM users WHERE username = ?").get(username)) bad("That username is taken. Choose another.");
+  const salt = crypto.randomBytes(16).toString("hex"), mustChange = b.must_change === false ? 0 : 1;
+  db.prepare("INSERT INTO users (name, username, phone, pass_hash, salt, role, status, must_change, created_t) VALUES (?,?,?,?,?,?,?,?,?)")
+    .run(name, username, phone, hashPw(b.password, salt), salt, role, "active", mustChange, now());
+  audit(req, "user.created", `${username} as ${role}${mustChange ? " (must change password)" : ""}`);
+  res.json({ ok: true });
+}));
+
 app.post("/api/users/:id", auth, need("users"), wrap((req, res) => {
   const u = db.prepare("SELECT * FROM users WHERE id = ?").get(num(req.params.id)); if (!u) bad("User not found.");
   if (u.id === req.user.id) bad("You can't change your own account here.");
@@ -572,24 +599,44 @@ app.post("/api/users/:id/logout", auth, need("users"), wrap((req, res) => {
 app.get("/api/audit", auth, need("audit"), (req, res) => {
   const limit = Math.min(500, Math.max(1, num(req.query.limit) || 200)), before = num(req.query.before) || 9e15;
   const action = str(req.query.action, 40);
-  const rows = db.prepare(`SELECT a.*, u.name, u.username FROM audit a LEFT JOIN users u ON u.id = a.user_id WHERE a.t < ? ${action ? "AND a.action LIKE ?" : ""} ORDER BY a.t DESC LIMIT ?`)
-    .all(...(action ? [before, action + "%", limit] : [before, limit]));
+  const from = isDate(req.query.from) ? Date.parse(req.query.from + "T00:00:00") : 0, to = isDate(req.query.to) ? Date.parse(req.query.to + "T23:59:59.999") : 9e15;
+  const rows = db.prepare(`SELECT a.*, u.name, u.username FROM audit a LEFT JOIN users u ON u.id = a.user_id WHERE a.t < ? AND a.t BETWEEN ? AND ? ${action ? "AND a.action LIKE ?" : ""} ORDER BY a.t DESC LIMIT ?`)
+    .all(...(action ? [before, from, to, action + "%", limit] : [before, from, to, limit]));
   res.json({ rows });
 });
 
-const SETTING_KEYS = ["shop_name", "shop_tagline", "shop_address", "shop_phone", "receipt_footer", "idle_minutes", "allow_negative_stock", "expense_categories", "payment_methods", "categories"];
+const SETTING_KEYS = ["shop_name", "shop_tagline", "shop_address", "shop_phone", "receipt_footer", "idle_minutes", "allow_negative_stock", "allow_custom_items", "auto_backup_keep", "expense_categories", "payment_methods", "categories"];
 app.get("/api/settings", auth, need("settings"), (req, res) => { const s = settings(); res.json(Object.fromEntries(SETTING_KEYS.map((k) => [k, s[k]]))); });
 app.put("/api/settings", auth, need("settings"), wrap((req, res) => {
   const b = req.body || {}, up = db.prepare("UPDATE settings SET value = ? WHERE key = ?"), changed = [];
   for (const k of SETTING_KEYS) if (k in b) {
     let v = str(b[k], 600);
     if (k === "idle_minutes") { const m = Math.round(num(v)); if (m < 5 || m > 720) bad("Auto log-out must be between 5 and 720 minutes."); v = String(m); }
-    if (k === "allow_negative_stock") v = v === "1" || v === "true" ? "1" : "0";
+    if (k === "allow_negative_stock" || k === "allow_custom_items") v = v === "1" || v === "true" ? "1" : "0";
+    if (k === "auto_backup_keep") { const m = Math.round(num(v)); if (m < 3 || m > 365) bad("Keep between 3 and 365 automatic backups."); v = String(m); }
     if (["expense_categories", "payment_methods", "categories"].includes(k)) { v = list(v).join(","); if (!v) bad("Lists cannot be empty."); }
     up.run(v, k); changed.push(k);
   }
   audit(req, "settings.changed", changed.join(", ")); res.json({ ok: true });
 }));
+
+// ---------- automatic daily backups (data/backups, newest N kept) ----------
+const BACKUP_DIR = path.join(DATA_DIR, "backups");
+function autoBackup() {
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const file = path.join(BACKUP_DIR, `grathia-${localDate()}.db`);
+    if (!fs.existsSync(file)) { db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`); console.log(`  Automatic backup saved: ${file}`); }
+    const keep = Math.max(3, num(settings().auto_backup_keep) || 30);
+    const files = fs.readdirSync(BACKUP_DIR).filter((f) => /^grathia-\d{4}-\d{2}-\d{2}\.db$/.test(f)).sort();
+    for (const f of files.slice(0, Math.max(0, files.length - keep))) fs.unlinkSync(path.join(BACKUP_DIR, f));
+  } catch (e) { console.error("  Automatic backup failed:", e.message); }
+}
+autoBackup(); setInterval(autoBackup, 3600e3).unref();
+app.get("/api/backup/info", auth, need("backup"), (req, res) => {
+  let files = []; try { files = fs.readdirSync(BACKUP_DIR).filter((f) => f.endsWith(".db")).sort().reverse(); } catch {}
+  res.json({ folder: BACKUP_DIR, count: files.length, latest: files[0] || null, files: files.slice(0, 10) });
+});
 
 app.get("/api/backup", auth, need("backup"), wrap((req, res) => {
   const file = path.join(DATA_DIR, `backup-${Date.now()}.db`);
@@ -601,6 +648,9 @@ app.get("/api/backup", auth, need("backup"), wrap((req, res) => {
 // ======================================================================
 // Errors and start-up
 // ======================================================================
+// Excel + PDF downloads for every section (see exports.js)
+require("./exports")(app, { db, stockLevels, report, can, settings, userNames, localDate, isDate, auth, audit, num });
+
 app.use("/api", (_req, res) => res.status(404).json({ error: "Not found." }));
 app.use((err, req, res, _next) => {
   if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
