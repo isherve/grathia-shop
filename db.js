@@ -1,18 +1,44 @@
-// Database: one SQLite file at ./data/grathia.db, created automatically on first start.
+// Database: libSQL / Turso.
+//  - On Vercel (or anywhere online): set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.
+//  - On your own computer with no settings: uses the file ./data/grathia.db.
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
-const { DatabaseSync } = require("node:sqlite");
+const { createClient } = require("@libsql/client");
 
+let url = process.env.TURSO_DATABASE_URL;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-fs.mkdirSync(DATA_DIR, { recursive: true });
-const DB_FILE = path.join(DATA_DIR, "grathia.db");
-const db = new DatabaseSync(DB_FILE);
+if (!url) {
+  if (process.env.VERCEL) throw new Error("TURSO_DATABASE_URL is not set. Add it in Vercel → Project → Settings → Environment Variables.");
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  url = "file:" + path.join(DATA_DIR, "grathia.db").replace(/\\/g, "/");
+}
+const client = createClient({ url, authToken: process.env.TURSO_AUTH_TOKEN });
 
-db.exec(`
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
+// Small helper API used by the server: db.get / db.all / db.run, all async.
+const clean = (args) => args.map((a) => (a === undefined ? null : a));
+const toRows = (rs) => rs.rows.map((r) => Object.fromEntries(rs.columns.map((c, i) => [c, r[i]])));
+function api(exec) {
+  return {
+    all: async (sql, ...args) => toRows(await exec({ sql, args: clean(args) })),
+    get: async (sql, ...args) => toRows(await exec({ sql, args: clean(args) }))[0],
+    run: async (sql, ...args) => {
+      const rs = await exec({ sql, args: clean(args) });
+      return { changes: rs.rowsAffected, lastInsertRowid: rs.lastInsertRowid == null ? null : Number(rs.lastInsertRowid) };
+    },
+  };
+}
+const db = api((stmt) => client.execute(stmt));
 
+// Run fn(t) inside one write transaction; t has the same get/all/run methods.
+db.tx = async (fn) => {
+  const t = await client.transaction("write");
+  try { const r = await fn(api((stmt) => t.execute(stmt))); await t.commit(); return r; }
+  catch (e) { await t.rollback().catch(() => {}); throw e; }
+  finally { t.close(); }
+};
+
+const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   name         TEXT NOT NULL,
@@ -144,22 +170,14 @@ CREATE TABLE IF NOT EXISTS audit (
   ip      TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS audit_t ON audit(t);
-`);
 
-// Upgrade older databases: allow custom (unlisted) items on sale lines.
-{
-  const col = db.prepare("PRAGMA table_info(sale_items)").all().find((c) => c.name === "product_id");
-  if (col && col.notnull) {
-    db.exec(`PRAGMA foreign_keys = OFF; BEGIN;
-      CREATE TABLE sale_items_new (id INTEGER PRIMARY KEY AUTOINCREMENT, sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
-        product_id INTEGER REFERENCES products(id), name TEXT NOT NULL, qty REAL NOT NULL, price REAL NOT NULL, cost REAL NOT NULL, line_total REAL NOT NULL);
-      INSERT INTO sale_items_new (id, sale_id, product_id, name, qty, price, cost, line_total) SELECT id, sale_id, product_id, name, qty, price, cost, line_total FROM sale_items;
-      DROP TABLE sale_items; ALTER TABLE sale_items_new RENAME TO sale_items;
-      CREATE INDEX IF NOT EXISTS sale_items_sale ON sale_items(sale_id);
-      COMMIT; PRAGMA foreign_keys = ON;`);
-    console.log("  Database upgraded (custom sale items).");
-  }
-}
+-- Failed log-in counters (kept in the database so every server instance sees them).
+CREATE TABLE IF NOT EXISTS login_fails (
+  key   TEXT PRIMARY KEY,
+  n     INTEGER NOT NULL DEFAULT 0,
+  until INTEGER NOT NULL DEFAULT 0
+);
+`;
 
 const DEFAULT_SETTINGS = {
   shop_name: "Grathia Sweet Haven",
@@ -176,26 +194,63 @@ const DEFAULT_SETTINGS = {
   payment_methods: "Cash,MTN MoMo,Airtel Money,Bank card,Bank transfer",
   categories: "Fresh Juice,Birthday Cakes,Wedding Cakes,Graduation Cakes,Cupcakes & Pastries,Snacks,Baking Supplies,Ingredients",
 };
-const putSetting = db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)");
-for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) putSetting.run(k, v);
 
-// First start only: the shop's starting items and the first recorded sale (from the Excel file).
-// A marker makes sure they are never added again (for example after "npm run admin -- reset-data").
-const seedDone = db.prepare("SELECT value FROM settings WHERE key = 'seed_done'").get();
-if (!seedDone && db.prepare("SELECT COUNT(*) AS n FROM products").get().n === 0) {
-  const t = Date.now();
-  const addP = db.prepare("INSERT INTO products (sku, name, category, unit, cost, price, reorder, sellable, created_t) VALUES (?,?,?,?,?,?,?,?,?)");
-  const addM = db.prepare("INSERT INTO stock_moves (date, t, product_id, type, qty, unit_cost, note) VALUES (?,?,?,?,?,?,?)");
-  const cake = addP.run("GSH-0001", "Birthday cake medium", "Birthday Cakes", "Cake", 10000, 10000, 1, 1, t).lastInsertRowid;
-  const mandazi = addP.run("GSH-0002", "Special mandazi", "Snacks", "Piece", 0, 100, 10, 1, t).lastInsertRowid;
-  addP.run("GSH-0003", "Fresh juice (small)", "Fresh Juice", "Cup", 0, 2500, 0, 1, t);
-  addP.run("GSH-0004", "Fresh juice (large)", "Fresh Juice", "Cup", 0, 3000, 0, 1, t);
-  addM.run("2026-11-23", t, cake, "opening", 2, 10000, "Opening stock");
-  const sale = db.prepare(`INSERT INTO sales (receipt_no, date, t, customer, subtotal, discount, total, method, note)
-    VALUES ('R261123-001', '2026-11-23', ?, 'ISHIMWE Hervin', 800, 0, 800, 'Airtel Money', 'Imported from Excel')`).run(Date.parse("2026-11-23T12:00:00Z")).lastInsertRowid;
-  db.prepare("INSERT INTO sale_items (sale_id, product_id, name, qty, price, cost, line_total) VALUES (?,?,?,?,?,?,?)").run(sale, mandazi, "Special mandazi", 8, 100, 0, 800);
-  console.log("  New database created with starting items.");
+async function init() {
+  await client.executeMultiple(SCHEMA);
+  // Upgrade older databases: allow custom (unlisted) items on sale lines.
+  const col = (await db.all("PRAGMA table_info(sale_items)")).find((c) => c.name === "product_id");
+  if (col && col.notnull) {
+    await client.executeMultiple(`PRAGMA foreign_keys = OFF; BEGIN;
+      CREATE TABLE sale_items_new (id INTEGER PRIMARY KEY AUTOINCREMENT, sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+        product_id INTEGER REFERENCES products(id), name TEXT NOT NULL, qty REAL NOT NULL, price REAL NOT NULL, cost REAL NOT NULL, line_total REAL NOT NULL);
+      INSERT INTO sale_items_new (id, sale_id, product_id, name, qty, price, cost, line_total) SELECT id, sale_id, product_id, name, qty, price, cost, line_total FROM sale_items;
+      DROP TABLE sale_items; ALTER TABLE sale_items_new RENAME TO sale_items;
+      CREATE INDEX IF NOT EXISTS sale_items_sale ON sale_items(sale_id);
+      COMMIT; PRAGMA foreign_keys = ON;`);
+    console.log("  Database upgraded (custom sale items).");
+  }
+  await client.batch(Object.entries(DEFAULT_SETTINGS).map(([k, v]) => ({ sql: "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", args: [k, v] })), "write");
+  // First start only: the shop's starting items and the first recorded sale (from the Excel file).
+  // A marker makes sure they are never added again (for example after "npm run admin -- reset-data").
+  await db.tx(async (t) => {
+    if (await t.get("SELECT value FROM settings WHERE key = 'seed_done'")) return;
+    await t.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('seed_done', '1')");
+    if ((await t.get("SELECT COUNT(*) AS n FROM products")).n !== 0) return;
+    const ts = Date.now();
+    const addP = "INSERT INTO products (sku, name, category, unit, cost, price, reorder, sellable, created_t) VALUES (?,?,?,?,?,?,?,?,?)";
+    const cake = (await t.run(addP, "GSH-0001", "Birthday cake medium", "Birthday Cakes", "Cake", 10000, 10000, 1, 1, ts)).lastInsertRowid;
+    const mandazi = (await t.run(addP, "GSH-0002", "Special mandazi", "Snacks", "Piece", 0, 100, 10, 1, ts)).lastInsertRowid;
+    await t.run(addP, "GSH-0003", "Fresh juice (small)", "Fresh Juice", "Cup", 0, 2500, 0, 1, ts);
+    await t.run(addP, "GSH-0004", "Fresh juice (large)", "Fresh Juice", "Cup", 0, 3000, 0, 1, ts);
+    await t.run("INSERT INTO stock_moves (date, t, product_id, type, qty, unit_cost, note) VALUES (?,?,?,?,?,?,?)", "2026-11-23", ts, cake, "opening", 2, 10000, "Opening stock");
+    const sale = (await t.run(`INSERT INTO sales (receipt_no, date, t, customer, subtotal, discount, total, method, note)
+      VALUES ('R261123-001', '2026-11-23', ?, 'ISHIMWE Hervin', 800, 0, 800, 'Airtel Money', 'Imported from Excel')`, Date.parse("2026-11-23T12:00:00Z"))).lastInsertRowid;
+    await t.run("INSERT INTO sale_items (sale_id, product_id, name, qty, price, cost, line_total) VALUES (?,?,?,?,?,?,?)", sale, mandazi, "Special mandazi", 8, 100, 0, 800);
+    console.log("  New database created with starting items.");
+  });
 }
-if (!seedDone) db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('seed_done', '1')").run();
+const ready = init();
+ready.catch((e) => console.error("Database start-up failed:", e));
 
-module.exports = { db, DB_FILE, DATA_DIR };
+// Copy the whole database into a new SQLite file (works for Turso and local). Returns the file path.
+async function backupToFile(file = path.join(os.tmpdir(), `grathia-backup-${Date.now()}.db`)) {
+  const out = createClient({ url: "file:" + file.replace(/\\/g, "/") });
+  try {
+    const objs = (await db.all("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'libsql_%' AND name NOT LIKE '!_%' ESCAPE '!' ORDER BY type = 'index'"));
+    for (const o of objs) {
+      await out.execute(o.sql);
+      if (o.type !== "table") continue;
+      const rows = await client.execute(`SELECT * FROM "${o.name}"`);
+      const cols = rows.columns.map((c) => `"${c}"`).join(","), qs = rows.columns.map(() => "?").join(",");
+      for (let i = 0; i < rows.rows.length; i += 500) {
+        await out.batch(rows.rows.slice(i, i + 500).map((r) => ({ sql: `INSERT INTO "${o.name}" (${cols}) VALUES (${qs})`, args: Array.from(r) })), "write");
+      }
+    }
+  } finally { out.close(); }
+  return file;
+}
+
+// true when the data is in an online database (Turso), false for the local file.
+const isRemote = !url.startsWith("file:");
+
+module.exports = { db, ready, backupToFile, isRemote, DATA_DIR, close: () => client.close() };

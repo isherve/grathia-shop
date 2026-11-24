@@ -5,14 +5,15 @@
   "main": "server.js",
   "private": true,
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning server.js",
-    "dev": "node --disable-warning=ExperimentalWarning --watch server.js",
-    "admin": "node --disable-warning=ExperimentalWarning admin-tool.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "admin": "node admin-tool.js"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": "22.x"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "exceljs": "^4.4.0",
     "express": "^4.21.2",
     "pdfkit": "^0.15.2"

@@ -11,9 +11,9 @@ const LOGO = path.join(__dirname, "public", "brand", "logo-192.png");
 const hasLogo = () => fs.existsSync(LOGO);
 
 module.exports = function registerExports(app, ctx) {
-  const { db, stockLevels, report, can, settings, userNames, localDate, isDate, auth, audit, num } = ctx;
+  const { db, stockLevels, report, can, settings, userNames, localDate, timeHM, dayStart, dayEnd, isDate, auth, audit, num } = ctx;
   const TYPE_LABEL = { opening: "Opening stock", purchase: "Bought", produced: "Made in kitchen", returned: "Returned", used: "Used in kitchen", damaged: "Damaged", expired: "Expired", gift: "Free gift", count: "Count correction" };
-  const time = (t) => (t ? new Date(t).toTimeString().slice(0, 5) : "");
+  const time = timeHM;
   const when = (t) => (t ? `${localDate(new Date(t))} ${time(t)}` : "");
   const byUser = (q, col = "user_id") => (q.user ? ` AND ${col} = ${Number(q.user) | 0}` : "");
   // column: [header, key, type, weight]  type: t=text m=money q=quantity p=percent
@@ -21,9 +21,9 @@ module.exports = function registerExports(app, ctx) {
 
   // ------------------------------------------------------------------ sections
   const SECTIONS = {
-    sales: { perm: "sales.view", title: "Sales & receipts", range: true, userFilter: true, build(q, user) {
-      const names = userNames(), rows = db.prepare("SELECT * FROM sales WHERE date BETWEEN ? AND ?" + byUser(q) + " ORDER BY t").all(q.from, q.to);
-      const items = db.prepare("SELECT si.* FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.date BETWEEN ? AND ?" + byUser(q, "s.user_id")).all(q.from, q.to);
+    sales: { perm: "sales.view", title: "Sales & receipts", range: true, userFilter: true, async build(q, user) {
+      const names = (await userNames()), rows = (await db.all("SELECT * FROM sales WHERE date BETWEEN ? AND ?" + byUser(q) + " ORDER BY t", q.from, q.to));
+      const items = (await db.all("SELECT si.* FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.date BETWEEN ? AND ?" + byUser(q, "s.user_id"), q.from, q.to));
       const by = {}; for (const i of items) (by[i.sale_id] ||= []).push(i);
       const ok = rows.filter((r) => !r.voided);
       return [{ heading: "Receipts", landscape: true,
@@ -32,16 +32,16 @@ module.exports = function registerExports(app, ctx) {
         totals: { receipt_no: `${ok.length} receipts`, total: ok.reduce((a, r) => a + r.total, 0), discount: ok.reduce((a, r) => a + r.discount, 0) } }];
     } },
 
-    items: { perm: "stock.view", title: "Items & prices", build(q, user) {
-      const C2 = can(user, "costs.view"), P = stockLevels().filter((p) => !p.archived);
+    items: { perm: "stock.view", title: "Items & prices", async build(q, user) {
+      const C2 = can(user, "costs.view"), P = (await stockLevels()).filter((p) => !p.archived);
       const cols = [C("Code", "sku", "t", 0.8), C("Item", "name", "t", 2.2), C("Category", "category", "t", 1.4), C("Unit", "unit", "t", 0.7), C("Selling price", "price", "m", 1)];
       if (C2) cols.push(C("Cost price", "cost", "m", 1), C("Margin", "margin", "p", 0.7));
       cols.push(C("In stock", "on_hand", "q", 0.8), C("Reorder at", "reorder", "q", 0.8), C("Type", "kind", "t", 0.9));
       return [{ heading: "Items", landscape: C2, cols, rows: P.map((p) => ({ ...p, margin: p.price ? (p.price - p.cost) / p.price : null, kind: p.sellable ? "For sale" : "Ingredient" })) }];
     } },
 
-    inventory: { perm: "stock.view", title: "Stock levels", build(q, user) {
-      const C2 = can(user, "costs.view"), upto = isDate(q.date) ? q.date : null, P = stockLevels(upto).filter((p) => !p.archived);
+    inventory: { perm: "stock.view", title: "Stock levels", async build(q, user) {
+      const C2 = can(user, "costs.view"), upto = isDate(q.date) ? q.date : null, P = (await stockLevels(upto)).filter((p) => !p.archived);
       const st = { ok: "OK", low: "LOW - reorder", check: "Check count", none: "Made to order" };
       const cols = [C("Item", "name", "t", 2.2), C("Category", "category", "t", 1.4), C("In stock", "on_hand", "q", 0.9), C("Unit", "unit", "t", 0.7), C("Reorder at", "reorder", "q", 0.9), C("Status", "st", "t", 1.1)];
       if (C2) cols.push(C("Cost each", "cost", "m", 1), C("Stock value", "val", "m", 1.1));
@@ -49,9 +49,9 @@ module.exports = function registerExports(app, ctx) {
       return [{ heading: upto ? `Stock on ${upto}` : "Stock now", landscape: C2, cols, rows, totals: C2 ? { name: `${rows.length} items`, val: rows.reduce((a, r) => a + r.val, 0) } : null }];
     } },
 
-    movements: { perm: "stock.view", title: "Stock movements", range: true, userFilter: true, build(q, user) {
-      const C2 = can(user, "costs.view"), names = userNames();
-      const rows = db.prepare("SELECT m.*, p.name, p.unit FROM stock_moves m JOIN products p ON p.id=m.product_id WHERE m.date BETWEEN ? AND ?" + byUser(q, "m.user_id") + " ORDER BY m.t").all(q.from, q.to);
+    movements: { perm: "stock.view", title: "Stock movements", range: true, userFilter: true, async build(q, user) {
+      const C2 = can(user, "costs.view"), names = (await userNames());
+      const rows = (await db.all("SELECT m.*, p.name, p.unit FROM stock_moves m JOIN products p ON p.id=m.product_id WHERE m.date BETWEEN ? AND ?" + byUser(q, "m.user_id") + " ORDER BY m.t", q.from, q.to));
       const cols = [C("Date", "date", "t", 0.9), C("Time", "time", "t", 0.5), C("Item", "name", "t", 1.8), C("Type", "type_l", "t", 1.1), C("Qty", "qty", "q", 0.6)];
       if (C2) cols.push(C("Cost each", "unit_cost", "m", 0.9));
       cols.push(C("Supplier / by", "supplier", "t", 1.1), C("Ref", "ref", "t", 0.8), C("Note", "note", "t", 1.5), C("Recorded by", "who", "t", 1), C("Status", "status", "t", 0.9));
@@ -59,8 +59,8 @@ module.exports = function registerExports(app, ctx) {
         rows: rows.map((m) => ({ ...m, time: time(m.t), type_l: TYPE_LABEL[m.type] || m.type, who: names[m.user_id] || "", status: m.voided ? "CANCELLED" : "OK" })) }];
     } },
 
-    expenses: { perm: "expense.view", title: "Expenses", range: true, userFilter: true, build(q) {
-      const names = userNames(), rows = db.prepare("SELECT * FROM expenses WHERE date BETWEEN ? AND ?" + byUser(q) + " ORDER BY t").all(q.from, q.to), ok = rows.filter((r) => !r.voided);
+    expenses: { perm: "expense.view", title: "Expenses", range: true, userFilter: true, async build(q) {
+      const names = (await userNames()), rows = (await db.all("SELECT * FROM expenses WHERE date BETWEEN ? AND ?" + byUser(q) + " ORDER BY t", q.from, q.to)), ok = rows.filter((r) => !r.voided);
       const cat = {}; for (const e of ok) cat[e.category] = (cat[e.category] || 0) + e.amount;
       return [{ heading: "Expenses", landscape: true,
         cols: [C("Date", "date", "t", 0.9), C("Type", "category", "t", 1.2), C("Description", "description", "t", 2.2), C("Paid by", "method", "t", 1), C("Note", "note", "t", 1.5), C("Recorded by", "who", "t", 1), C("Amount", "amount", "m", 1), C("Status", "status", "t", 0.9)],
@@ -68,13 +68,13 @@ module.exports = function registerExports(app, ctx) {
       { heading: "Expenses by type", cols: [C("Type", "name", "t", 2), C("Amount", "v", "m", 1)], rows: Object.entries(cat).sort((a, b) => b[1] - a[1]).map(([name, v]) => ({ name, v })), totals: { name: "Total", v: ok.reduce((a, e) => a + e.amount, 0) } }];
     } },
 
-    daybook: { perm: "daybook", title: "Day book", day: true, build(q, user) {
-      const d = q.date, C2 = can(user, "costs.view"), names = userNames();
-      const sales = db.prepare("SELECT * FROM sales WHERE date = ? ORDER BY t").all(d), ok = sales.filter((s) => !s.voided);
-      const items = db.prepare("SELECT si.* FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.date = ?").all(d);
+    daybook: { perm: "daybook", title: "Day book", day: true, async build(q, user) {
+      const d = q.date, C2 = can(user, "costs.view"), names = (await userNames());
+      const sales = (await db.all("SELECT * FROM sales WHERE date = ? ORDER BY t", d)), ok = sales.filter((s) => !s.voided);
+      const items = (await db.all("SELECT si.* FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.date = ?", d));
       const by = {}; for (const i of items) (by[i.sale_id] ||= []).push(i);
-      const exp = db.prepare("SELECT * FROM expenses WHERE date = ? ORDER BY t").all(d), expOk = exp.filter((e) => !e.voided);
-      const moves = db.prepare("SELECT m.*, p.name, p.unit FROM stock_moves m JOIN products p ON p.id=m.product_id WHERE m.date = ? ORDER BY m.t").all(d);
+      const exp = (await db.all("SELECT * FROM expenses WHERE date = ? ORDER BY t", d)), expOk = exp.filter((e) => !e.voided);
+      const moves = (await db.all("SELECT m.*, p.name, p.unit FROM stock_moves m JOIN products p ON p.id=m.product_id WHERE m.date = ? ORDER BY m.t", d));
       const sold = {}, cin = {}, cout = {};
       for (const s of ok) for (const i of by[s.id] || []) if (i.product_id) sold[i.product_id] = (sold[i.product_id] || 0) + i.qty;
       for (const m of moves) if (!m.voided && m.type !== "opening") { const t = m.qty > 0 ? cin : cout; t[m.product_id] = (t[m.product_id] || 0) + Math.abs(m.qty); }
@@ -91,12 +91,12 @@ module.exports = function registerExports(app, ctx) {
         { heading: "Stock changes", cols: [C("Time", "time", "t", 0.5), C("Item", "name", "t", 1.8), C("Type", "type_l", "t", 1.1), C("Qty", "qty", "q", 0.6), C("Details", "det", "t", 2), C("Status", "status", "t", 0.9)],
           rows: moves.map((m) => ({ ...m, time: time(m.t), type_l: TYPE_LABEL[m.type] || m.type, det: [m.supplier, m.ref, m.note].filter(Boolean).join(" / "), status: m.voided ? "CANCELLED" : "OK" })) },
         { heading: "Stock at closing", cols: [C("Item", "name", "t", 2), C("Came in", "cin", "q", 0.8), C("Sold", "sold", "q", 0.8), C("Other out", "cout", "q", 0.8), C("Left at closing", "on_hand", "q", 1), C("Unit", "unit", "t", 0.7)],
-          rows: stockLevels(d).filter((p) => !p.archived).map((p) => ({ ...p, cin: cin[p.id] || 0, sold: sold[p.id] || 0, cout: cout[p.id] || 0 })) },
+          rows: (await stockLevels(d)).filter((p) => !p.archived).map((p) => ({ ...p, cin: cin[p.id] || 0, sold: sold[p.id] || 0, cout: cout[p.id] || 0 })) },
       ];
     } },
 
-    reports: { perm: "reports", title: "Profit & loss report", range: true, build(q) {
-      const R = report(q.from, q.to), pct = (a, b) => (b ? a / b : null);
+    reports: { perm: "reports", title: "Profit & loss report", range: true, async build(q) {
+      const R = (await report(q.from, q.to)), pct = (a, b) => (b ? a / b : null);
       return [
         { heading: "Profit & loss", cols: [C("", "k", "t", 2.5), C("Amount (RWF)", "v", "m", 1)], rows: [
           { k: "Sales (money received)", v: R.sales }, { k: "Discounts given (already taken off)", v: R.discounts }, { k: "Cost of items sold", v: -R.cogs }, { k: "Gross profit", v: R.gross, bold: true },
@@ -112,15 +112,15 @@ module.exports = function registerExports(app, ctx) {
       ];
     } },
 
-    activity: { perm: null, title: "Activity", range: true, userFilter: true, build(q, user) {
+    activity: { perm: null, title: "Activity", range: true, userFilter: true, async build(q, user) {
       const uid = Number(q.user) | 0, C2 = can(user, "costs.view");
-      const sales = db.prepare("SELECT * FROM sales WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY t").all(uid, q.from, q.to), ok = sales.filter((s) => !s.voided);
-      const items = db.prepare("SELECT si.* FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.user_id = ? AND s.date BETWEEN ? AND ?").all(uid, q.from, q.to);
+      const sales = (await db.all("SELECT * FROM sales WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY t", uid, q.from, q.to)), ok = sales.filter((s) => !s.voided);
+      const items = (await db.all("SELECT si.* FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.user_id = ? AND s.date BETWEEN ? AND ?", uid, q.from, q.to));
       const by = {}; for (const i of items) (by[i.sale_id] ||= []).push(i);
-      const exp = db.prepare("SELECT * FROM expenses WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY t").all(uid, q.from, q.to), expOk = exp.filter((x) => !x.voided);
-      const moves = db.prepare("SELECT m.*, p.name, p.unit FROM stock_moves m JOIN products p ON p.id=m.product_id WHERE m.user_id = ? AND m.date BETWEEN ? AND ? ORDER BY m.t").all(uid, q.from, q.to);
-      const a = Date.parse(q.from + "T00:00:00"), b = Date.parse(q.to + "T23:59:59.999");
-      const acts = db.prepare("SELECT * FROM audit WHERE user_id = ? AND t BETWEEN ? AND ? ORDER BY t").all(uid, a, b);
+      const exp = (await db.all("SELECT * FROM expenses WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY t", uid, q.from, q.to)), expOk = exp.filter((x) => !x.voided);
+      const moves = (await db.all("SELECT m.*, p.name, p.unit FROM stock_moves m JOIN products p ON p.id=m.product_id WHERE m.user_id = ? AND m.date BETWEEN ? AND ? ORDER BY m.t", uid, q.from, q.to));
+      const a = dayStart(q.from), b = dayEnd(q.to);
+      const acts = (await db.all("SELECT * FROM audit WHERE user_id = ? AND t BETWEEN ? AND ? ORDER BY t", uid, a, b));
       const byM = {}; for (const s of ok) byM[s.method] = (byM[s.method] || 0) + s.total;
       const salesTot = ok.reduce((x, s) => x + s.total, 0), expTot = expOk.reduce((x, e) => x + e.amount, 0);
       const days = new Set([...sales.map((s) => s.date), ...exp.map((x) => x.date), ...moves.map((m) => m.date)]).size;
@@ -140,29 +140,29 @@ module.exports = function registerExports(app, ctx) {
       ];
     } },
 
-    customers: { perm: "customers", title: "Customers", build() {
-      const rows = db.prepare(`SELECT c.*, COUNT(s.id) visits, COALESCE(SUM(s.total),0) spent, MAX(s.date) last_visit FROM customers c
-        LEFT JOIN sales s ON s.customer_id = c.id AND s.voided = 0 GROUP BY c.id ORDER BY spent DESC, c.name`).all();
+    customers: { perm: "customers", title: "Customers", async build() {
+      const rows = (await db.all(`SELECT c.*, COUNT(s.id) visits, COALESCE(SUM(s.total),0) spent, MAX(s.date) last_visit FROM customers c
+        LEFT JOIN sales s ON s.customer_id = c.id AND s.voided = 0 GROUP BY c.id ORDER BY spent DESC, c.name`));
       return [{ heading: "Customers", cols: [C("Name", "name", "t", 1.8), C("Phone", "phone", "t", 1.2), C("Visits", "visits", "q", 0.6), C("Total spent", "spent", "m", 1), C("Last visit", "last_visit", "t", 0.9), C("Note", "note", "t", 1.8)], rows }];
     } },
 
-    users: { perm: "users", title: "Users & roles", build() {
+    users: { perm: "users", title: "Users & roles", async build() {
       const R = { admin: "Administrator", manager: "Manager", cashier: "Cashier" }, S = { active: "Active", pending: "Waiting approval", disabled: "Switched off" };
-      const rows = db.prepare("SELECT name, username, phone, role, status, must_change, created_t, last_login_t FROM users ORDER BY name").all();
+      const rows = (await db.all("SELECT name, username, phone, role, status, must_change, created_t, last_login_t FROM users ORDER BY name"));
       return [{ heading: "Accounts", landscape: true, cols: [C("Name", "name", "t", 1.6), C("Username", "username", "t", 1), C("Phone", "phone", "t", 1.1), C("Role", "role_l", "t", 1), C("Status", "status_l", "t", 1.1), C("Created", "created", "t", 1.2), C("Last login", "last", "t", 1.2)],
         rows: rows.map((u) => ({ ...u, role_l: R[u.role], status_l: S[u.status] + (u.must_change ? " (must change password)" : ""), created: when(u.created_t), last: when(u.last_login_t) })) }];
     } },
 
-    audit: { perm: "audit", title: "Audit log", range: true, build(q) {
-      const a = Date.parse(q.from + "T00:00:00"), b = Date.parse(q.to + "T23:59:59.999");
-      const rows = db.prepare("SELECT a.*, u.name FROM audit a LEFT JOIN users u ON u.id = a.user_id WHERE a.t BETWEEN ? AND ? ORDER BY a.t DESC LIMIT 20000").all(a, b);
+    audit: { perm: "audit", title: "Audit log", range: true, async build(q) {
+      const a = dayStart(q.from), b = dayEnd(q.to);
+      const rows = (await db.all("SELECT a.*, u.name FROM audit a LEFT JOIN users u ON u.id = a.user_id WHERE a.t BETWEEN ? AND ? ORDER BY a.t DESC LIMIT 20000", a, b));
       return [{ heading: "Every recorded action", landscape: true, cols: [C("When", "when", "t", 1.2), C("Who", "name", "t", 1.2), C("Action", "action", "t", 1.3), C("Details", "detail", "t", 3.2), C("Device IP", "ip", "t", 0.9)],
         rows: rows.map((r) => ({ ...r, when: when(r.t), name: r.name || (r.ip === "terminal" ? "Terminal tool" : "—") })) }];
     } },
   };
 
   // ------------------------------------------------------------------ writers
-  const S = () => settings();
+  const S = settings;
   async function writeXlsx(res, doc) {
     const wb = new ExcelJS.Workbook(); wb.creator = doc.shop; wb.created = new Date();
     const used = new Set(), logoId = hasLogo() ? wb.addImage({ filename: LOGO, extension: "png" }) : null;
@@ -271,28 +271,28 @@ module.exports = function registerExports(app, ctx) {
       if (!sec.userFilter) delete q.user;
       let person = null;
       if (q.user) {
-        person = db.prepare("SELECT id, name FROM users WHERE id = ?").get(Number(q.user) | 0);
+        person = (await db.get("SELECT id, name FROM users WHERE id = ?", Number(q.user) | 0));
         if (!person) return res.status(404).json({ error: "That person was not found." });
         if (m[1] === "activity" && person.id !== req.user.id && !(can(req.user, "users") || can(req.user, "reports")))
           return res.status(403).json({ error: "You can only download your own activity." });
       }
       if (sec.range) { q.to = isDate(q.to) ? q.to : today; q.from = isDate(q.from) ? q.from : q.to.slice(0, 8) + "01"; if (q.from > q.to) [q.from, q.to] = [q.to, q.from]; }
       if (sec.day) q.date = isDate(q.date) ? q.date : today;
-      const s = S(), period = sec.range ? (q.from === q.to ? q.from : `${q.from} to ${q.to}`) : sec.day ? q.date : q.date && isDate(q.date) ? `On ${q.date}` : `As at ${when(Date.now())}`;
+      const s = (await S()), period = sec.range ? (q.from === q.to ? q.from : `${q.from} to ${q.to}`) : sec.day ? q.date : q.date && isDate(q.date) ? `On ${q.date}` : `As at ${when(Date.now())}`;
       const title = m[1] === "activity" ? `Activity of ${person.name}` : person ? `${sec.title} — recorded by ${person.name}` : sec.title;
       const slug = (x) => String(x).replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "");
       const doc = { shop: s.shop_name, tagline: s.shop_tagline, address: s.shop_address, phone: s.shop_phone, title, period, by: req.user.name,
-        tables: sec.build(q, req.user), file: `${slug(s.shop_name)}_${m[1]}${person ? "_" + slug(person.name) : ""}_${sec.range ? q.from + "_to_" + q.to : sec.day ? q.date : today}` };
-      audit(req, "export." + m[2], `${m[1]} ${period}`);
+        tables: await sec.build(q, req.user), file: `${slug(s.shop_name)}_${m[1]}${person ? "_" + slug(person.name) : ""}_${sec.range ? q.from + "_to_" + q.to : sec.day ? q.date : today}` };
+      await audit(req, "export." + m[2], `${m[1]} ${period}`);
       if (m[2] === "xlsx") await writeXlsx(res, doc); else writePdf(res, doc);
     } catch (e) { next(e); }
   });
 
-  app.get("/api/sales/:id/receipt.pdf", auth, (req, res, next) => {
+  app.get("/api/sales/:id/receipt.pdf", auth, async (req, res, next) => {
     try {
       if (!can(req.user, "sales.view")) return res.status(403).json({ error: "You don't have permission." });
-      const s = db.prepare("SELECT * FROM sales WHERE id = ?").get(num(req.params.id)); if (!s) return res.status(404).json({ error: "Receipt not found." });
-      const items = db.prepare("SELECT * FROM sale_items WHERE sale_id = ?").all(s.id), st = S(), names = userNames();
+      const s = (await db.get("SELECT * FROM sales WHERE id = ?", num(req.params.id))); if (!s) return res.status(404).json({ error: "Receipt not found." });
+      const items = (await db.all("SELECT * FROM sale_items WHERE sale_id = ?", s.id)), st = (await S()), names = (await userNames());
       const W = 226, H = 330 + items.length * 30 + (s.discount ? 14 : 0) + (s.voided ? 40 : 0) + (s.customer ? 12 : 0);
       const pdf = new PDFDocument({ size: [W, H], margin: 12, info: { Title: `Receipt ${s.receipt_no}` } });
       res.setHeader("Content-Type", "application/pdf"); res.setHeader("Content-Disposition", `inline; filename="Receipt_${s.receipt_no}.pdf"`);
@@ -314,7 +314,7 @@ module.exports = function registerExports(app, ctx) {
       line();
       pdf.font("Helvetica").fontSize(7.5).text(pdfText(st.receipt_footer || ""), 12, pdf.y, { align: "center", width: w });
       pdf.end();
-      audit(req, "receipt.pdf", s.receipt_no);
+      await audit(req, "receipt.pdf", s.receipt_no);
     } catch (e) { next(e); }
   });
 };

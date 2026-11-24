@@ -113,8 +113,26 @@ New staff click **Create account**; an administrator approves them in **Users & 
 The terminal shows `On phones (same Wi-Fi): http://192.168.x.x:3000`. Phones on the **same Wi-Fi** can open that.
 The computer must stay on. If Windows asks about the firewall, allow **Private networks** only.
 
-> **Do not put this on the public internet as it is.** For access from outside the shop, it must run behind
-> HTTPS (for example a reverse proxy such as Caddy or Nginx, with `TRUST_PROXY=1`). Ask a technical person.
+> If you run it on your own computer, do not open it to the public internet directly. To use it from anywhere,
+> put it online with Vercel + Turso (below): Vercel gives it HTTPS automatically.
+
+### Online with Vercel + Turso
+
+Vercel has no permanent disk, so online the data lives in a **Turso** database (free tier is enough).
+
+1. On **turso.tech** create a database (pick a location close to your Vercel region, e.g. Frankfurt).
+   Copy its **URL** (`libsql://...`) and create an **auth token**.
+2. On **vercel.com** → *Add New → Project* → import this GitHub repo. Leave the build settings as they are.
+3. Before deploying, add **Environment Variables**: `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`.
+4. Deploy. On the first visit, the tables and starting items are created; the first account you register becomes admin.
+   **Register your admin account straight away**, before sharing the link.
+
+- Dates follow Rwanda time (`Africa/Kigali`); set `SHOP_TZ` to change it.
+- Without the Turso settings, the app uses the local file `data/grathia.db` as before.
+- The admin tool can work on the online database: set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in the terminal first
+  (PowerShell: `$env:TURSO_DATABASE_URL="libsql://..."`), then `npm run admin -- list`.
+- Online, Turso keeps automatic backups; **Download backup** still gives you a `.db` copy. To restore one online:
+  `turso db create grathia2 --from-file backup.db`, then point `TURSO_DATABASE_URL` at the new database.
 
 ## 9. Backups
 
@@ -129,8 +147,10 @@ grathia-shop/
 ├── server.js        secure server: login, roles, sales, stock, reports, audit, backup
 ├── exports.js       Excel and PDF downloads for every page, receipt PDF
 ├── admin-tool.js    emergency terminal tool (npm run admin)
-├── db.js            database tables + starting items
-├── package.json     app settings (uses 3 libraries: express, exceljs, pdfkit)
+├── db.js            database tables + starting items (local file or Turso)
+├── time.js          shop time zone (Rwanda) for dates and times
+├── vercel.json      settings for hosting on Vercel
+├── package.json     app settings (uses 4 libraries: express, exceljs, pdfkit, @libsql/client)
 ├── public/
 │   ├── index.html   page shell with the sidebar
 │   ├── app.js       all screens
