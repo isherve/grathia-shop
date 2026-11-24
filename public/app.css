@@ -124,6 +124,15 @@ td.n,th.n{text-align:end;white-space:nowrap;font-variant-numeric:tabular-nums}
 .paym{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
 .paym button{min-height:40px;border:1.5px solid var(--line);background:var(--card);border-radius:10px;font-weight:700;cursor:pointer;font-size:13px}
 .paym button[aria-pressed=true]{border-color:var(--pri);background:var(--priSoft);color:var(--pri)}
+/* split payment rows, payment summary, online dot, order groups */
+.payrow{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) auto;gap:6px;margin-bottom:6px}
+.payrow select,.payrow input{min-height:38px}
+.paysum{margin-top:8px;padding:8px 10px;border-radius:10px;font-size:13px;background:var(--soft);border:1px solid var(--line)}
+.paysum.ok{color:var(--ok)}.paysum.warn{color:var(--amb)}.paysum.bad{color:var(--bad)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--line);vertical-align:middle}
+.dot.on{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+.av .avdot{position:absolute;right:-1px;bottom:-1px;border:2px solid var(--card)}
+tr.grp td{background:var(--soft);font-size:12.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute)}
 
 /* ---------- modal, toast ---------- */
 #modal{position:fixed;inset:0;background:rgba(5,12,18,.55);display:none;align-items:center;justify-content:center;z-index:30;padding:16px}

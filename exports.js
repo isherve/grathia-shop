@@ -11,7 +11,7 @@ const LOGO = path.join(__dirname, "public", "brand", "logo-192.png");
 const hasLogo = () => fs.existsSync(LOGO);
 
 module.exports = function registerExports(app, ctx) {
-  const { db, stockLevels, report, can, settings, userNames, localDate, timeHM, dayStart, dayEnd, isDate, auth, audit, num } = ctx;
+  const { db, stockLevels, report, can, settings, userNames, localDate, timeHM, dayStart, dayEnd, isDate, auth, audit, num, money } = ctx;
   const TYPE_LABEL = { opening: "Opening stock", purchase: "Bought", produced: "Made in kitchen", returned: "Returned", used: "Used in kitchen", damaged: "Damaged", expired: "Expired", gift: "Free gift", count: "Count correction" };
   const time = timeHM;
   const when = (t) => (t ? `${localDate(new Date(t))} ${time(t)}` : "");
@@ -22,14 +22,14 @@ module.exports = function registerExports(app, ctx) {
   // ------------------------------------------------------------------ sections
   const SECTIONS = {
     sales: { perm: "sales.view", title: "Sales & receipts", range: true, userFilter: true, async build(q, user) {
-      const names = (await userNames()), rows = (await db.all("SELECT * FROM sales WHERE date BETWEEN ? AND ?" + byUser(q) + " ORDER BY t", q.from, q.to));
+      const names = (await userNames()), rows = (await db.all("SELECT sales.*, COALESCE(pp.paid,0) paid FROM sales LEFT JOIN (SELECT sale_id, SUM(amount) paid FROM payments WHERE voided = 0 AND sale_id IS NOT NULL GROUP BY sale_id) pp ON pp.sale_id = sales.id WHERE date BETWEEN ? AND ?" + byUser(q) + " ORDER BY t", q.from, q.to));
       const items = (await db.all("SELECT si.* FROM sale_items si JOIN sales s ON s.id=si.sale_id WHERE s.date BETWEEN ? AND ?" + byUser(q, "s.user_id"), q.from, q.to));
       const by = {}; for (const i of items) (by[i.sale_id] ||= []).push(i);
       const ok = rows.filter((r) => !r.voided);
       return [{ heading: "Receipts", landscape: true,
-        cols: [C("Receipt", "receipt_no", "t", 1.1), C("Date", "date", "t", 0.9), C("Time", "time", "t", 0.5), C("Customer", "customer", "t", 1.2), C("Items", "items", "t", 3), C("Paid by", "method", "t", 1), C("Cashier", "who", "t", 1.1), C("Discount", "discount", "m", 0.8), C("Total", "total", "m", 0.9), C("Status", "status", "t", 0.9)],
-        rows: rows.map((r) => ({ ...r, time: time(r.t), who: names[r.user_id] || "", items: (by[r.id] || []).map((i) => `${i.qty}x ${i.name}`).join(", "), status: r.voided ? "CANCELLED" : "Paid" })),
-        totals: { receipt_no: `${ok.length} receipts`, total: ok.reduce((a, r) => a + r.total, 0), discount: ok.reduce((a, r) => a + r.discount, 0) } }];
+        cols: [C("Receipt", "receipt_no", "t", 1.1), C("Date", "date", "t", 0.9), C("Time", "time", "t", 0.5), C("Customer", "customer", "t", 1.2), C("Items", "items", "t", 3), C("Paid by", "method", "t", 1), C("Cashier", "who", "t", 1.1), C("Discount", "discount", "m", 0.8), C("Total", "total", "m", 0.9), C("Still owed", "owed", "m", 0.9), C("Status", "status", "t", 0.9)],
+        rows: rows.map((r) => { const owed = r.voided ? 0 : Math.max(0, money(r.total - r.paid)); return { ...r, owed: owed || null, time: time(r.t), who: names[r.user_id] || "", items: (by[r.id] || []).map((i) => `${i.qty}x ${i.name}`).join(", "), status: r.voided ? "CANCELLED" : owed ? "On credit" : "Paid" }; }),
+        totals: { receipt_no: `${ok.length} receipts`, total: ok.reduce((a, r) => a + r.total, 0), discount: ok.reduce((a, r) => a + r.discount, 0), owed: ok.reduce((a, r) => a + Math.max(0, r.total - r.paid), 0) } }];
     } },
 
     items: { perm: "stock.view", title: "Items & prices", async build(q, user) {
@@ -79,11 +79,16 @@ module.exports = function registerExports(app, ctx) {
       for (const s of ok) for (const i of by[s.id] || []) if (i.product_id) sold[i.product_id] = (sold[i.product_id] || 0) + i.qty;
       for (const m of moves) if (!m.voided && m.type !== "opening") { const t = m.qty > 0 ? cin : cout; t[m.product_id] = (t[m.product_id] || 0) + Math.abs(m.qty); }
       const salesTot = ok.reduce((a, s) => a + s.total, 0), expTot = expOk.reduce((a, e) => a + e.amount, 0);
-      const byM = {}; for (const s of ok) byM[s.method] = (byM[s.method] || 0) + s.total;
+      const recv = await db.all("SELECT method, SUM(amount) v FROM payments WHERE voided = 0 AND date = ? GROUP BY method ORDER BY v DESC", d);
+      const closing = await db.get("SELECT * FROM day_closings WHERE date = ? ORDER BY t DESC LIMIT 1", d);
       const summary = [{ k: "Sales", v: salesTot }, { k: "Receipts", v: ok.length, plain: true }, { k: "Expenses", v: expTot }, { k: "Sales minus expenses", v: salesTot - expTot },
-        ...Object.entries(byM).map(([m, v]) => ({ k: `Received by ${m}`, v })), { k: "Cancelled sales", v: sales.length - ok.length, plain: true }];
+        { k: "Money received (sales, deposits, debts paid)", v: recv.reduce((a, r) => a + r.v, 0) },
+        ...recv.map((r) => ({ k: `  received by ${r.method}`, v: r.v })), { k: "Cancelled sales", v: sales.length - ok.length, plain: true }];
+      const closeTable = closing ? [{ heading: `Day closing — counted by ${names[closing.user_id] || "?"} at ${time(closing.t)}${closing.note ? " — " + closing.note : ""}`,
+        cols: [C("Payment method", "method", "t", 1.6), C("Expected", "expected", "m", 1), C("Counted", "counted", "m", 1), C("Difference", "difference", "m", 1)],
+        rows: JSON.parse(closing.lines), totals: { method: "Total", expected: closing.expected, counted: closing.counted, difference: closing.difference } }] : [];
       return [
-        { heading: "Summary", cols: [C("", "k", "t", 2), C("Amount (RWF)", "v", "m", 1)], rows: summary },
+        { heading: "Summary", cols: [C("", "k", "t", 2), C("Amount (RWF)", "v", "m", 1)], rows: summary }, ...closeTable,
         { heading: "Receipts", landscape: true, cols: [C("Time", "time", "t", 0.5), C("Receipt", "receipt_no", "t", 1), C("Items", "items", "t", 3), C("Customer", "customer", "t", 1.1), C("Paid by", "method", "t", 1), C("Cashier", "who", "t", 1), C("Total", "total", "m", 0.9), C("Status", "status", "t", 0.9)],
           rows: sales.map((s) => ({ ...s, time: time(s.t), items: (by[s.id] || []).map((i) => `${i.qty}x ${i.name}`).join(", "), who: names[s.user_id] || "", status: s.voided ? "CANCELLED" : "Paid" })), totals: { time: "Total", total: salesTot } },
         { heading: "Expenses", cols: [C("Time", "time", "t", 0.5), C("Type", "category", "t", 1.2), C("Description", "description", "t", 2), C("Paid by", "method", "t", 1), C("Amount", "amount", "m", 1), C("Status", "status", "t", 0.9)],
@@ -100,12 +105,13 @@ module.exports = function registerExports(app, ctx) {
       return [
         { heading: "Profit & loss", cols: [C("", "k", "t", 2.5), C("Amount (RWF)", "v", "m", 1)], rows: [
           { k: "Sales (money received)", v: R.sales }, { k: "Discounts given (already taken off)", v: R.discounts }, { k: "Cost of items sold", v: -R.cogs }, { k: "Gross profit", v: R.gross, bold: true },
-          { k: "Expenses", v: -R.expenses }, { k: "Losses (damaged, expired, gifts)", v: -R.losses }, { k: "NET PROFIT", v: R.net, bold: true },
+          { k: "Expenses", v: -R.expenses }, { k: "Losses (damaged, expired, gifts)", v: -R.losses }, ...(R.kept_deposits ? [{ k: "Deposits kept (cancelled orders)", v: R.kept_deposits }] : []), { k: "NET PROFIT", v: R.net, bold: true },
+          { k: "Money actually received (all payments)", v: R.received }, { k: "Sold on credit in this period", v: R.credit_given }, { k: "Customers owe today (all time)", v: R.owed_now },
           { k: "Receipts", v: R.receipts, plain: true }, { k: "Average receipt", v: R.avg_receipt }, { k: "Stock bought (cash out, for information)", v: R.purchases }, { k: "Cancelled sales", v: R.voided, plain: true }] },
         { heading: "Sales by item", cols: [C("Item", "name", "t", 2.2), C("Qty sold", "qty", "q", 0.8), C("Sales", "v", "m", 1), C("Cost", "cost", "m", 1), C("Profit", "profit", "m", 1), C("Margin", "margin", "p", 0.7)],
           rows: R.by_item.map((i) => ({ ...i, profit: i.v - i.cost, margin: pct(i.v - i.cost, i.v) })), totals: { name: "Total", v: R.sales + R.discounts, cost: R.cogs, profit: R.sales + R.discounts - R.cogs } },
         { heading: "Sales by category", cols: [C("Category", "name", "t", 2), C("Sales", "v", "m", 1), C("Share", "share", "p", 0.7)], rows: R.by_category.map((r) => ({ ...r, share: pct(r.v, R.sales + R.discounts) })) },
-        { heading: "Money by payment method", cols: [C("Payment method", "name", "t", 2), C("Receipts", "n", "q", 0.7), C("Amount", "v", "m", 1)], rows: R.by_method },
+        { heading: "Money received by payment method", cols: [C("Payment method", "name", "t", 2), C("Payments", "n", "q", 0.7), C("Amount", "v", "m", 1)], rows: R.by_method },
         { heading: "Sales by staff", cols: [C("Staff", "name", "t", 2), C("Receipts", "n", "q", 0.7), C("Amount", "v", "m", 1)], rows: R.by_staff },
         { heading: "Expenses by type", cols: [C("Type", "name", "t", 2), C("Amount", "v", "m", 1)], rows: R.exp_by_category, totals: { name: "Total", v: R.expenses } },
         { heading: "Sales per day", cols: [C("Date", "date", "t", 1), C("Receipts", "n", "q", 0.7), C("Sales", "v", "m", 1)], rows: R.by_day, totals: { date: "Total", n: R.receipts, v: R.sales } },
@@ -138,6 +144,23 @@ module.exports = function registerExports(app, ctx) {
           rows: moves.map((m) => ({ ...m, time: time(m.t), type_l: TYPE_LABEL[m.type] || m.type, det: [m.supplier, m.ref, m.note].filter(Boolean).join(" / "), status: m.voided ? "CANCELLED" : "OK" })) },
         { heading: "Everything done in the system", landscape: true, cols: [C("When", "when", "t", 1.2), C("Action", "action", "t", 1.3), C("Details", "detail", "t", 3.4), C("Device IP", "ip", "t", 0.9)], rows: acts.map((r) => ({ ...r, when: when(r.t) })) },
       ];
+    } },
+
+    debts: { perm: "customers", title: "Money owed by customers", async build() {
+      const rows = (await db.all(`SELECT c.name, c.phone, MIN(s.date) since, COUNT(s.id) n, SUM(s.total - COALESCE(pp.paid,0)) owed FROM sales s JOIN customers c ON c.id = s.customer_id
+        LEFT JOIN (SELECT sale_id, SUM(amount) paid FROM payments WHERE voided = 0 AND sale_id IS NOT NULL GROUP BY sale_id) pp ON pp.sale_id = s.id
+        WHERE s.voided = 0 AND s.total - COALESCE(pp.paid,0) > 0.001 GROUP BY c.id ORDER BY owed DESC`));
+      return [{ heading: "Customers who owe money", cols: [C("Customer", "name", "t", 1.8), C("Phone", "phone", "t", 1.2), C("Unpaid receipts", "n", "q", 0.8), C("Owing since", "since", "t", 1), C("Amount owed", "owed", "m", 1)],
+        rows, totals: { name: `${rows.length} customers`, owed: rows.reduce((a, r) => a + r.owed, 0) } }];
+    } },
+
+    orders: { perm: "sell", title: "Customer orders", async build(q, user) {
+      const rows = (await db.all(`SELECT o.*, COALESCE(op.paid,0) paid FROM orders o LEFT JOIN (SELECT order_id, SUM(amount) paid FROM payments WHERE voided = 0 AND order_id IS NOT NULL GROUP BY order_id) op ON op.order_id = o.id
+        WHERE o.status IN ('open','ready') ORDER BY o.pickup_date, o.pickup_time`));
+      const S = { open: "Taken", ready: "Ready" };
+      return [{ heading: "Orders waiting to be collected", landscape: true, cols: [C("Pickup", "pick", "t", 1.1), C("Order", "order_no", "t", 0.9), C("Customer", "customer", "t", 1.2), C("Phone", "phone", "t", 1), C("What", "description", "t", 3), C("Price", "total", "m", 0.9), C("Paid", "paid", "m", 0.9), C("Balance", "bal", "m", 0.9), C("Status", "st", "t", 0.7)],
+        rows: rows.map((o) => ({ ...o, pick: `${o.pickup_date} ${o.pickup_time || ""}`.trim(), bal: o.total - o.paid, st: S[o.status] })),
+        totals: { pick: `${rows.length} orders`, total: rows.reduce((a, o) => a + o.total, 0), paid: rows.reduce((a, o) => a + o.paid, 0), bal: rows.reduce((a, o) => a + o.total - o.paid, 0) } }];
     } },
 
     customers: { perm: "customers", title: "Customers", async build() {
@@ -293,7 +316,8 @@ module.exports = function registerExports(app, ctx) {
       if (!can(req.user, "sales.view")) return res.status(403).json({ error: "You don't have permission." });
       const s = (await db.get("SELECT * FROM sales WHERE id = ?", num(req.params.id))); if (!s) return res.status(404).json({ error: "Receipt not found." });
       const items = (await db.all("SELECT * FROM sale_items WHERE sale_id = ?", s.id)), st = (await S()), names = (await userNames());
-      const W = 226, H = 330 + items.length * 30 + (s.discount ? 14 : 0) + (s.voided ? 40 : 0) + (s.customer ? 12 : 0);
+      const pays = await db.all("SELECT * FROM payments WHERE sale_id = ? AND voided = 0 ORDER BY t", s.id), paid = pays.reduce((a, p) => a + p.amount, 0), owed = s.voided ? 0 : Math.max(0, s.total - paid);
+      const W = 226, H = 350 + items.length * 30 + pays.length * 12 + (s.discount ? 14 : 0) + (s.voided ? 40 : 0) + (s.customer ? 12 : 0);
       const pdf = new PDFDocument({ size: [W, H], margin: 12, info: { Title: `Receipt ${s.receipt_no}` } });
       res.setHeader("Content-Type", "application/pdf"); res.setHeader("Content-Disposition", `inline; filename="Receipt_${s.receipt_no}.pdf"`);
       pdf.pipe(res);
@@ -310,7 +334,9 @@ module.exports = function registerExports(app, ctx) {
       const f = (n) => Math.round(n).toLocaleString("en-US");
       for (const i of items) { pdf.font("Courier-Bold").fontSize(8.5).text(pdfText(i.name), 12, pdf.y, { width: w }); const y = pdf.y; pdf.font("Courier").text(`  ${i.qty} x ${f(i.price)}`, 12, y, { width: w * 0.6 }); pdf.text(f(i.line_total), 12 + w * 0.6, y, { width: w * 0.4, align: "right" }); }
       line();
-      lr("Subtotal", f(s.subtotal)); if (s.discount) lr("Discount", "-" + f(s.discount)); lr(`TOTAL (${st.currency || "RWF"})`, f(s.total), true); lr("Paid by", s.method);
+      lr("Subtotal", f(s.subtotal)); if (s.discount) lr("Discount", "-" + f(s.discount)); lr(`TOTAL (${st.currency || "RWF"})`, f(s.total), true);
+      for (const p of pays) lr(p.kind === "deposit" ? `Deposit ${p.date.slice(5)} ${p.method}` : p.kind === "repayment" ? `Paid ${p.date.slice(5)} ${p.method}` : `Paid ${p.method}`, f(p.amount));
+      if (owed > 0.001) lr("BALANCE OWED", f(owed), true);
       line();
       pdf.font("Helvetica").fontSize(7.5).text(pdfText(st.receipt_footer || ""), 12, pdf.y, { align: "center", width: w });
       pdf.end();

@@ -61,9 +61,9 @@ const ask = (q, hidden) => new Promise((resolve) => {
     console.log(`  Done. ${u.name}'s account is switched on.`);
   } else if (cmd === "reset-data") {
     const keepItems = username === "keep-items";
-    const counts = {}; for (const t of ["sales", "sale_items", "stock_moves", "expenses", "customers", "products", "audit", "users"]) counts[t] = (await db.get(`SELECT COUNT(*) n FROM ${t}`)).n;
+    const counts = {}; for (const t of ["sales", "sale_items", "payments", "orders", "day_closings", "stock_moves", "expenses", "customers", "products", "audit", "users"]) counts[t] = (await db.get(`SELECT COUNT(*) n FROM ${t}`)).n;
     const count = (t) => counts[t];
-    const tables = ["sales", "sale_items", "stock_moves", "expenses", "customers", ...(keepItems ? [] : ["products"]), "audit"];
+    const tables = ["sales", "sale_items", "payments", "orders", "day_closings", "stock_moves", "expenses", "customers", ...(keepItems ? [] : ["products"]), "audit"];
     console.log("\n  This will DELETE:");
     for (const t of tables) console.log(`    ${t.padEnd(12)} ${count(t)} records`);
     console.log(`\n  It will KEEP: ${count("users")} user accounts, shop settings${keepItems ? `, ${count("products")} items (stock set to 0)` : ""}.`);
@@ -77,8 +77,8 @@ const ask = (q, hidden) => new Promise((resolve) => {
     console.log(`  Backup saved: ${file}`);
     try {
       await db.tx(async (t) => {
-        for (const x of ["sale_items", "sales", "stock_moves", "expenses", "customers", ...(keepItems ? [] : ["products"]), "audit"]) await t.run(`DELETE FROM ${x}`);
-        await t.run(`DELETE FROM sqlite_sequence WHERE name IN (${["sale_items", "sales", "stock_moves", "expenses", "customers", ...(keepItems ? [] : ["products"]), "audit"].map((x) => `'${x}'`).join(",")})`);
+        for (const x of ["payments", "day_closings", "orders", "sale_items", "sales", "stock_moves", "expenses", "customers", ...(keepItems ? [] : ["products"]), "audit"]) await t.run(`DELETE FROM ${x}`);
+        await t.run(`DELETE FROM sqlite_sequence WHERE name IN (${["payments", "day_closings", "orders", "sale_items", "sales", "stock_moves", "expenses", "customers", ...(keepItems ? [] : ["products"]), "audit"].map((x) => `'${x}'`).join(",")})`);
         await t.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('seed_done', '1')");
       });
     } catch (e) { console.log("  Something went wrong. Nothing was changed: " + e.message); process.exit(1); }

@@ -177,6 +177,69 @@ CREATE TABLE IF NOT EXISTS login_fails (
   n     INTEGER NOT NULL DEFAULT 0,
   until INTEGER NOT NULL DEFAULT 0
 );
+
+-- Every amount of money received (or refunded, negative), by method and day.
+-- kind: sale (paid at the till) | repayment (customer paying a debt) | deposit (on an order) | refund
+CREATE TABLE IF NOT EXISTS payments (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  date        TEXT NOT NULL,
+  t           INTEGER NOT NULL,
+  kind        TEXT NOT NULL,
+  method      TEXT NOT NULL,
+  amount      REAL NOT NULL,
+  sale_id     INTEGER REFERENCES sales(id),
+  order_id    INTEGER REFERENCES orders(id),
+  customer_id INTEGER REFERENCES customers(id),
+  note        TEXT DEFAULT '',
+  user_id     INTEGER REFERENCES users(id),
+  voided      INTEGER NOT NULL DEFAULT 0,
+  void_by     INTEGER,
+  void_t      INTEGER,
+  void_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS payments_date ON payments(date);
+CREATE INDEX IF NOT EXISTS payments_sale ON payments(sale_id);
+CREATE INDEX IF NOT EXISTS payments_order ON payments(order_id);
+
+-- Customer orders (e.g. cakes) taken in advance, usually with a deposit.
+-- status: open | ready | collected | cancelled
+CREATE TABLE IF NOT EXISTS orders (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_no     TEXT UNIQUE,
+  t            INTEGER NOT NULL,
+  date         TEXT NOT NULL,
+  customer_id  INTEGER REFERENCES customers(id),
+  customer     TEXT NOT NULL,
+  phone        TEXT DEFAULT '',
+  description  TEXT NOT NULL,
+  pickup_date  TEXT NOT NULL,
+  pickup_time  TEXT DEFAULT '',
+  total        REAL NOT NULL,
+  cost         REAL NOT NULL DEFAULT 0,
+  note         TEXT DEFAULT '',
+  status       TEXT NOT NULL DEFAULT 'open',
+  sale_id      INTEGER REFERENCES sales(id),
+  user_id      INTEGER REFERENCES users(id),
+  done_t       INTEGER,
+  done_by      INTEGER,
+  cancel_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS orders_pickup ON orders(pickup_date);
+
+-- End-of-day cash count: what the system expected per payment method vs what was counted.
+CREATE TABLE IF NOT EXISTS day_closings (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  date       TEXT NOT NULL,
+  t          INTEGER NOT NULL,
+  user_id    INTEGER REFERENCES users(id),
+  float      REAL NOT NULL DEFAULT 0,
+  lines      TEXT NOT NULL,          -- JSON: [{method, expected, counted}]
+  expected   REAL NOT NULL,
+  counted    REAL NOT NULL,
+  difference REAL NOT NULL,
+  note       TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS closings_date ON day_closings(date);
 `;
 
 const DEFAULT_SETTINGS = {
@@ -189,6 +252,7 @@ const DEFAULT_SETTINGS = {
   idle_minutes: "30",
   allow_negative_stock: "1",
   allow_custom_items: "1",
+  allow_signup: "0",
   auto_backup_keep: "30",
   expense_categories: "Rent,Salaries & wages,Electricity,Water,Gas / charcoal,Transport,Packaging,Marketing,Airtime & internet,Repairs,Taxes & fees,Other",
   payment_methods: "Cash,MTN MoMo,Airtel Money,Bank card,Bank transfer",
@@ -210,23 +274,30 @@ async function init() {
     console.log("  Database upgraded (custom sale items).");
   }
   await client.batch(Object.entries(DEFAULT_SETTINGS).map(([k, v]) => ({ sql: "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", args: [k, v] })), "write");
-  // First start only: the shop's starting items and the first recorded sale (from the Excel file).
-  // A marker makes sure they are never added again (for example after "npm run admin -- reset-data").
+  // Upgrade older databases: every sale made before payments were tracked was paid in full by its method.
   await db.tx(async (t) => {
-    if (await t.get("SELECT value FROM settings WHERE key = 'seed_done'")) return;
-    await t.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('seed_done', '1')");
-    if ((await t.get("SELECT COUNT(*) AS n FROM products")).n !== 0) return;
-    const ts = Date.now();
-    const addP = "INSERT INTO products (sku, name, category, unit, cost, price, reorder, sellable, created_t) VALUES (?,?,?,?,?,?,?,?,?)";
-    const cake = (await t.run(addP, "GSH-0001", "Birthday cake medium", "Birthday Cakes", "Cake", 10000, 10000, 1, 1, ts)).lastInsertRowid;
-    const mandazi = (await t.run(addP, "GSH-0002", "Special mandazi", "Snacks", "Piece", 0, 100, 10, 1, ts)).lastInsertRowid;
-    await t.run(addP, "GSH-0003", "Fresh juice (small)", "Fresh Juice", "Cup", 0, 2500, 0, 1, ts);
-    await t.run(addP, "GSH-0004", "Fresh juice (large)", "Fresh Juice", "Cup", 0, 3000, 0, 1, ts);
-    await t.run("INSERT INTO stock_moves (date, t, product_id, type, qty, unit_cost, note) VALUES (?,?,?,?,?,?,?)", "2026-11-23", ts, cake, "opening", 2, 10000, "Opening stock");
-    const sale = (await t.run(`INSERT INTO sales (receipt_no, date, t, customer, subtotal, discount, total, method, note)
-      VALUES ('R261123-001', '2026-11-23', ?, 'ISHIMWE Hervin', 800, 0, 800, 'Airtel Money', 'Imported from Excel')`, Date.parse("2026-11-23T12:00:00Z"))).lastInsertRowid;
-    await t.run("INSERT INTO sale_items (sale_id, product_id, name, qty, price, cost, line_total) VALUES (?,?,?,?,?,?,?)", sale, mandazi, "Special mandazi", 8, 100, 0, 800);
-    console.log("  New database created with starting items.");
+    if (await t.get("SELECT value FROM settings WHERE key = 'payments_migrated'")) return;
+    await t.run(`INSERT INTO payments (date, t, kind, method, amount, sale_id, customer_id, user_id, voided)
+      SELECT s.date, s.t, 'sale', s.method, s.total, s.id, s.customer_id, s.user_id, s.voided FROM sales s
+      WHERE NOT EXISTS (SELECT 1 FROM payments p WHERE p.sale_id = s.id)`);
+    await t.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('payments_migrated', '1')");
+  });
+  // One time: remove the sample data older versions created on first start (sale R261123-001 "Imported from Excel"
+  // and the 4 starter items). Items are only removed if nothing else (sales, stock changes, orders) uses them.
+  await db.tx(async (t) => {
+    if (await t.get("SELECT value FROM settings WHERE key = 'sample_removed'")) return;
+    const sale = await t.get("SELECT id FROM sales WHERE receipt_no = 'R261123-001' AND note = 'Imported from Excel' AND user_id IS NULL");
+    if (sale) for (const q of ["DELETE FROM payments WHERE sale_id = ?", "DELETE FROM sale_items WHERE sale_id = ?", "DELETE FROM sales WHERE id = ?"]) await t.run(q, sale.id);
+    const SAMPLE_MOVE = "type = 'opening' AND note = 'Opening stock' AND user_id IS NULL AND date = '2026-11-23'";
+    const SAMPLE = [["GSH-0001", "Birthday cake medium"], ["GSH-0002", "Special mandazi"], ["GSH-0003", "Fresh juice (small)"], ["GSH-0004", "Fresh juice (large)"]];
+    for (const [sku, name] of SAMPLE) {
+      const p = await t.get("SELECT id FROM products WHERE sku = ? AND name = ?", sku, name); if (!p) continue;
+      const used = await t.get(`SELECT (SELECT COUNT(*) FROM sale_items WHERE product_id = ?) + (SELECT COUNT(*) FROM stock_moves WHERE product_id = ? AND NOT (${SAMPLE_MOVE})) n`, p.id, p.id);
+      if (used.n) continue; // the shop really uses this item: keep it and its opening stock
+      await t.run(`DELETE FROM stock_moves WHERE product_id = ? AND ${SAMPLE_MOVE}`, p.id);
+      await t.run("DELETE FROM products WHERE id = ?", p.id);
+    }
+    await t.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('sample_removed', '1')");
   });
 }
 const ready = init();
@@ -237,8 +308,10 @@ async function backupToFile(file = path.join(os.tmpdir(), `grathia-backup-${Date
   const out = createClient({ url: "file:" + file.replace(/\\/g, "/") });
   try {
     const objs = (await db.all("SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'libsql_%' AND name NOT LIKE '!_%' ESCAPE '!' ORDER BY type = 'index'"));
+    // Tables refer to each other (e.g. payments → orders), so create everything first and copy rows without link checks.
+    await out.execute("PRAGMA foreign_keys = OFF");
+    for (const o of objs) await out.execute(o.sql);
     for (const o of objs) {
-      await out.execute(o.sql);
       if (o.type !== "table") continue;
       const rows = await client.execute(`SELECT * FROM "${o.name}"`);
       const cols = rows.columns.map((c) => `"${c}"`).join(","), qs = rows.columns.map(() => "?").join(",");

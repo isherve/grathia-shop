@@ -145,6 +145,12 @@ const clearFails = (key) => db.run("DELETE FROM login_fails WHERE key = ?", key)
 // ======================================================================
 // Auth routes
 // ======================================================================
+// Self sign-up: always possible for the very first account (it becomes the administrator),
+// afterwards only when the administrator switches it on in Settings.
+async function signupOpen() {
+  const [s, u] = await Promise.all([settings(), db.get("SELECT COUNT(*) c FROM users")]);
+  return u.c === 0 || s.allow_signup === "1";
+}
 app.post("/api/auth/register", wrap(async (req, res) => {
   const name = str(req.body.name, 60), username = str(req.body.username, 30).toLowerCase(), phone = str(req.body.phone, 30), pw = req.body.password;
   if (!name) bad("Please enter your full name.");
@@ -152,6 +158,7 @@ app.post("/api/auth/register", wrap(async (req, res) => {
   const p = passwordProblem(pw, username); if (p) bad(p);
   if (await lockedFor("reg:" + ipOf(req))) bad("Too many sign-ups from this device. Try later.");
   await addFail("reg:" + ipOf(req)); // slows down mass sign-ups (5 per 15 minutes per device)
+  if (!(await signupOpen())) return res.status(403).json({ error: "New accounts are created by the shop administrator. Please ask them to add you." });
   if (await db.get("SELECT 1 FROM users WHERE username = ?", username)) bad("That username is taken. Choose another.");
   const salt = crypto.randomBytes(16).toString("hex"), hash = hashPw(pw, salt);
   const { id, first } = await db.tx(async (t) => {
@@ -192,8 +199,8 @@ app.post("/api/auth/logout", wrap(async (req, res) => {
 }));
 
 app.get("/api/auth/me", wrap(async (req, res) => {
-  const s = await settings();
-  res.json({ user: pubUser(req.user) || null, perms: req.user ? permsOf(req.user.role) : [],
+  const [s, signup] = await Promise.all([settings(), signupOpen()]);
+  res.json({ user: pubUser(req.user) || null, perms: req.user ? permsOf(req.user.role) : [], signup,
     shop: { name: s.shop_name, tagline: s.shop_tagline, address: s.shop_address, phone: s.shop_phone, footer: s.receipt_footer, currency: s.currency, idle_minutes: num(s.idle_minutes) || 30 } });
 }));
 
@@ -257,8 +264,18 @@ app.get("/api/dashboard", auth, wrap(async (req, res) => {
   const byDay = Object.fromEntries(series.map((r) => [r.date, r.v]));
   const days = []; for (let i = 13; i >= 0; i--) { const d = localDate(new Date(Date.now() - i * 864e5)); days.push({ date: d, sales: byDay[d] || 0 }); }
   const low = levels.filter((p) => !p.archived && (p.status === "low" || p.status === "check")).map((p) => ({ id: p.id, name: p.name, unit: p.unit, on_hand: p.on_hand, reorder: p.reorder }));
+  const soon = localDate(new Date(Date.now() + 2 * 864e5));
+  const [received, owed, ordersDue, online] = await Promise.all([
+    sum("SELECT SUM(amount) v FROM payments WHERE voided=0 AND date=?", today),
+    db.get(`SELECT SUM(s.total - COALESCE(pp.paid,0)) v FROM sales s ${PAID_JOIN} WHERE s.voided=0 AND s.customer_id IS NOT NULL`).then((r) => Math.max(0, money(r.v || 0))),
+    can(req.user, "sell") ? db.all(`SELECT o.id, o.order_no, o.customer, o.description, o.pickup_date, o.pickup_time, o.status, o.total, COALESCE(op.paid,0) paid FROM orders o
+      LEFT JOIN (SELECT order_id, SUM(amount) paid FROM payments WHERE voided=0 AND order_id IS NOT NULL GROUP BY order_id) op ON op.order_id = o.id
+      WHERE o.status IN ('open','ready') AND o.pickup_date <= ? ORDER BY o.pickup_date, o.pickup_time LIMIT 20`, soon) : [],
+    can(req.user, "users") ? db.all(`SELECT u.id, u.name, u.role, MAX(s.last_seen_t) seen FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.last_seen_t > ? GROUP BY u.id ORDER BY seen DESC`, now() - 10 * 60e3) : null,
+  ]);
   const out = {
-    today: { sales: todaySales, receipts: todayReceipts, expenses: todayExp },
+    today: { sales: todaySales, receipts: todayReceipts, expenses: todayExp, received },
+    owed: can(req.user, "customers") ? owed : null, orders_due: ordersDue, online,
     month: { sales: monthSales, expenses: monthExp },
     days, top, low, recent,
   };
@@ -275,11 +292,49 @@ app.get("/api/dashboard", auth, wrap(async (req, res) => {
 // ======================================================================
 // Sales (point of sale)
 // ======================================================================
+// ---------- payments: split payment and credit ----------
+// payments: [{method, amount}] — what the customer pays now. Whatever is left of `total` is credit (owed).
+function parsePayments(raw, total, methods) {
+  const list = Array.isArray(raw) ? raw : [];
+  if (list.length > 10) bad("Too many payment lines.");
+  const pays = [];
+  for (const p of list) {
+    const amount = money(p.amount); if (amount === 0) continue;
+    if (amount < 0) bad("Payment amounts cannot be negative.");
+    if (!methods.includes(p.method)) bad("Choose how the customer paid.");
+    pays.push({ method: p.method, amount });
+  }
+  const paid = money(pays.reduce((a, p) => a + p.amount, 0));
+  if (paid > total + 0.001) bad("The payments are more than the amount due. Enter only what is kept (give the change back).");
+  return { pays, paid, credit: money(total - paid) };
+}
+const methodLabel = (pays, credit) => { const m = [...new Set(pays.map((p) => p.method))]; if (credit > 0.001) m.push("Credit"); return m.join(" + ") || "Credit"; };
+
+// Find the customer by id or exact name; create them if needed (credit and orders need a customer record).
+async function findOrCreateCustomer(t, { id, name, phone }, create) {
+  if (num(id)) { const c = await t.get("SELECT * FROM customers WHERE id = ?", num(id)); if (c) return c; }
+  name = str(name, 60); if (!name) return null;
+  const c = await t.get("SELECT * FROM customers WHERE name = ? COLLATE NOCASE", name); if (c) return c;
+  if (!create) return null;
+  const nid = (await t.run("INSERT INTO customers (name, phone, note, created_t) VALUES (?,?,?,?)", name, str(phone, 30), "", now())).lastInsertRowid;
+  return { id: nid, name, phone: str(phone, 30) };
+}
+
+async function insertSale(t, { date, user, customer, lines, subtotal, discount, pays, credit, note }) {
+  const prefix = "R" + date.slice(2).replace(/-/g, "") + "-";
+  const n = (await t.get("SELECT COUNT(*) c FROM sales WHERE receipt_no LIKE ?", prefix + "%")).c + 1;
+  const receipt = prefix + String(n).padStart(3, "0"), total = money(subtotal - discount), ts = now();
+  const id = (await t.run(`INSERT INTO sales (receipt_no, date, t, user_id, customer_id, customer, subtotal, discount, total, method, note)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`, receipt, date, ts, user.id, customer?.id ?? null, customer?.name || "", subtotal, discount, total, methodLabel(pays, credit), note || "")).lastInsertRowid;
+  for (const l of lines) await t.run("INSERT INTO sale_items (sale_id, product_id, name, qty, price, cost, line_total) VALUES (?,?,?,?,?,?,?)", id, l.p.id, l.p.name, l.qty, l.price, l.cost, l.line);
+  for (const p of pays) await t.run("INSERT INTO payments (date, t, kind, method, amount, sale_id, customer_id, user_id) VALUES (?,?,?,?,?,?,?,?)", date, ts, "sale", p.method, p.amount, id, customer?.id ?? null, user.id);
+  return { id, receipt, total };
+}
+
 app.post("/api/sales", auth, need("sell"), wrap(async (req, res) => {
   const b = req.body || {}, date = isDate(b.date) ? b.date : localDate();
   if (date !== localDate() && !can(req.user, "sales.void")) bad("Only a manager can record a sale on another date.");
   const s = await settings(), methods = list(s.payment_methods);
-  const method = methods.includes(b.method) ? b.method : bad("Choose how the customer paid.");
   if (!Array.isArray(b.items) || !b.items.length || b.items.length > 100) bad("The cart is empty.");
   const levels = Object.fromEntries((await stockLevels()).map((p) => [p.id, p]));
   const lines = b.items.map((it) => {
@@ -303,43 +358,53 @@ app.post("/api/sales", auth, need("sell"), wrap(async (req, res) => {
   }
   const subtotal = money(lines.reduce((a, l) => a + l.line, 0));
   const discount = money(b.discount); if (discount < 0 || discount > subtotal) bad("Discount must be between 0 and the subtotal.");
-  let customerId = null, customer = str(b.customer, 60);
-  if (b.customer_id) { const c = await db.get("SELECT * FROM customers WHERE id = ?", num(b.customer_id)); if (c) { customerId = c.id; customer = c.name; } }
+  const total = money(subtotal - discount);
+  // Older screens send one `method`; newer ones send `payments` (split payment / part credit).
+  const { pays, credit } = parsePayments(Array.isArray(b.payments) ? b.payments : [{ method: b.method, amount: total }], total, methods);
+  if (credit > 0.001 && !str(b.customer, 60) && !num(b.customer_id)) bad("To sell on credit, enter the customer's name (and phone) so we know who owes the money.");
   const sale = await db.tx(async (t) => {
-    const prefix = "R" + date.slice(2).replace(/-/g, "") + "-";
-    const n = (await t.get("SELECT COUNT(*) c FROM sales WHERE receipt_no LIKE ?", prefix + "%")).c + 1;
-    const receipt = prefix + String(n).padStart(3, "0");
-    const id = (await t.run(`INSERT INTO sales (receipt_no, date, t, user_id, customer_id, customer, referred_by, subtotal, discount, total, method, note)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, receipt, date, now(), req.user.id, customerId, customer, str(b.referred_by, 60), subtotal, discount, money(subtotal - discount), method, str(b.note, 200))).lastInsertRowid;
-    for (const l of lines) await t.run("INSERT INTO sale_items (sale_id, product_id, name, qty, price, cost, line_total) VALUES (?,?,?,?,?,?,?)", id, l.p.id, l.p.name, l.qty, l.price, l.cost, l.line);
-    return { id, receipt };
+    const customer = await findOrCreateCustomer(t, { id: b.customer_id, name: b.customer, phone: b.customer_phone }, credit > 0.001);
+    return insertSale(t, { date, user: req.user, customer: customer || (str(b.customer, 60) ? { id: null, name: str(b.customer, 60) } : null), lines, subtotal, discount, pays, credit, note: str(b.note, 200) });
   });
   const customs = lines.filter((l) => l.custom).map((l) => `${l.p.name} @ ${l.price}`);
-  await audit(req, "sale.created", `${sale.receipt} total ${money(subtotal - discount)}${customs.length ? " — custom: " + customs.join(", ") : ""}`);
+  await audit(req, "sale.created", `${sale.receipt} total ${sale.total} (${methodLabel(pays, credit)})${credit > 0.001 ? ` — on credit ${credit}` : ""}${customs.length ? " — custom: " + customs.join(", ") : ""}`);
   res.json({ ok: true, sale: await getSale(sale.id, req.user) });
 }));
 
 async function getSale(id, user) {
   const s = await db.get("SELECT * FROM sales WHERE id = ?", id); if (!s) return null;
-  s.items = await db.all("SELECT product_id, name, qty, price, cost, line_total FROM sale_items WHERE sale_id = ?", id);
+  [s.items, s.payments] = await Promise.all([
+    db.all("SELECT product_id, name, qty, price, cost, line_total FROM sale_items WHERE sale_id = ?", id),
+    db.all("SELECT id, date, t, kind, method, amount, user_id FROM payments WHERE sale_id = ? AND voided = 0 ORDER BY t", id),
+  ]);
+  s.paid = money(s.payments.reduce((a, p) => a + p.amount, 0)); s.balance = s.voided ? 0 : money(s.total - s.paid);
   if (!can(user, "costs.view")) s.items.forEach((i) => delete i.cost);
   return s;
 }
+const PAID_JOIN = "LEFT JOIN (SELECT sale_id, SUM(amount) paid FROM payments WHERE voided = 0 AND sale_id IS NOT NULL GROUP BY sale_id) pp ON pp.sale_id = s.id";
 app.get("/api/sales", auth, need("sales.view"), wrap(async (req, res) => {
   const from = isDate(req.query.from) ? req.query.from : localDate(), to = isDate(req.query.to) ? req.query.to : from;
-  const uf = num(req.query.user) ? ` AND user_id = ${num(req.query.user) | 0}` : "";
-  const [sales, items] = await Promise.all([
-    db.all("SELECT * FROM sales WHERE date BETWEEN ? AND ?" + uf + " ORDER BY t DESC LIMIT 2000", from, to),
-    db.all(`SELECT si.* FROM sale_items si JOIN sales s ON s.id = si.sale_id WHERE s.date BETWEEN ? AND ?` + uf.replace("user_id", "s.user_id"), from, to),
+  const uf = num(req.query.user) ? ` AND s.user_id = ${num(req.query.user) | 0}` : "";
+  const [sales, items, pays] = await Promise.all([
+    db.all(`SELECT s.*, COALESCE(pp.paid, 0) paid FROM sales s ${PAID_JOIN} WHERE s.date BETWEEN ? AND ?` + uf + " ORDER BY s.t DESC LIMIT 2000", from, to),
+    db.all(`SELECT si.* FROM sale_items si JOIN sales s ON s.id = si.sale_id WHERE s.date BETWEEN ? AND ?` + uf, from, to),
+    db.all(`SELECT p.id, p.sale_id, p.date, p.t, p.kind, p.method, p.amount, p.user_id FROM payments p JOIN sales s ON s.id = p.sale_id WHERE p.voided = 0 AND s.date BETWEEN ? AND ?` + uf, from, to),
   ]);
-  const by = {}; for (const i of items) { if (!can(req.user, "costs.view")) delete i.cost; (by[i.sale_id] ||= []).push(i); }
-  res.json({ sales: sales.map((s) => ({ ...s, items: by[s.id] || [] })) });
+  const by = {}, pb = {};
+  for (const i of items) { if (!can(req.user, "costs.view")) delete i.cost; (by[i.sale_id] ||= []).push(i); }
+  for (const p of pays) (pb[p.sale_id] ||= []).push(p);
+  res.json({ sales: sales.map((s) => ({ ...s, items: by[s.id] || [], payments: pb[s.id] || [], balance: s.voided ? 0 : money(s.total - s.paid) })) });
 }));
 app.post("/api/sales/:id/void", auth, need("sales.void"), wrap(async (req, res) => {
   const reason = str(req.body.reason, 200); if (reason.length < 3) bad("Please write the reason.");
   const s = await db.get("SELECT * FROM sales WHERE id = ?", num(req.params.id)); if (!s) bad("Sale not found.");
   if (s.voided) bad("This sale is already cancelled.");
-  await db.run("UPDATE sales SET voided=1, void_by=?, void_t=?, void_reason=? WHERE id=?", req.user.id, now(), reason, s.id);
+  if (await db.get("SELECT 1 FROM payments WHERE sale_id = ? AND kind = 'repayment' AND voided = 0", s.id)) bad("The customer already paid part of this debt later. Cancel those repayments first (Customers → statement).");
+  if (await db.get("SELECT 1 FROM orders WHERE sale_id = ?", s.id)) bad("This sale comes from a collected order, so it cannot be cancelled here.");
+  await db.tx(async (t) => {
+    await t.run("UPDATE sales SET voided=1, void_by=?, void_t=?, void_reason=? WHERE id=?", req.user.id, now(), reason, s.id);
+    await t.run("UPDATE payments SET voided=1, void_by=?, void_t=?, void_reason=? WHERE sale_id=? AND voided=0", req.user.id, now(), "Sale cancelled: " + reason, s.id);
+  });
   await audit(req, "sale.voided", `${s.receipt_no}: ${reason}`); res.json({ ok: true });
 }));
 
@@ -453,10 +518,6 @@ app.post("/api/expenses/:id/void", auth, need("expense.void"), wrap(async (req, 
 // ======================================================================
 // Customers
 // ======================================================================
-app.get("/api/customers", auth, need("customers"), wrap(async (req, res) => {
-  res.json({ customers: await db.all(`SELECT c.*, COUNT(s.id) visits, COALESCE(SUM(s.total),0) spent, MAX(s.date) last_visit
-    FROM customers c LEFT JOIN sales s ON s.customer_id = c.id AND s.voided = 0 GROUP BY c.id ORDER BY spent DESC, c.name`) });
-}));
 app.post("/api/customers", auth, need("customers"), wrap(async (req, res) => {
   const name = str(req.body.name, 60); if (!name) bad("Enter the customer's name.");
   const id = num(req.params.id || req.body.id);
@@ -506,14 +567,21 @@ async function report(from, to) {
       WHERE s.voided=0 AND s.date BETWEEN ? AND ? GROUP BY COALESCE(si.product_id, 'c:' || si.name) ORDER BY v DESC`),
     q(`SELECT COALESCE(p.category, 'Custom items') name, SUM(si.line_total) v FROM sale_items si JOIN sales s ON s.id=si.sale_id LEFT JOIN products p ON p.id=si.product_id
       WHERE s.voided=0 AND s.date BETWEEN ? AND ? GROUP BY 1 ORDER BY v DESC`),
-    q("SELECT method name, SUM(total) v, COUNT(*) n FROM sales WHERE voided=0 AND date BETWEEN ? AND ? GROUP BY method ORDER BY v DESC"),
+    q("SELECT method name, SUM(amount) v, COUNT(*) n FROM payments WHERE voided=0 AND date BETWEEN ? AND ? GROUP BY method ORDER BY v DESC"),
     q(`SELECT COALESCE(u.name,'(imported)') name, SUM(s.total) v, COUNT(*) n FROM sales s LEFT JOIN users u ON u.id=s.user_id
       WHERE s.voided=0 AND s.date BETWEEN ? AND ? GROUP BY s.user_id ORDER BY v DESC`),
     q("SELECT category name, SUM(amount) v FROM expenses WHERE voided=0 AND date BETWEEN ? AND ? GROUP BY category ORDER BY v DESC"),
     one("SELECT COUNT(*) v FROM sales WHERE voided=1 AND date BETWEEN ? AND ?"),
   ]);
+  const [received, kept, owedNow, creditGiven] = await Promise.all([
+    one("SELECT SUM(amount) v FROM payments WHERE voided=0 AND date BETWEEN ? AND ?"),
+    one("SELECT SUM(p.amount) v FROM payments p JOIN orders o ON o.id = p.order_id WHERE p.voided=0 AND o.status='cancelled' AND p.date BETWEEN ? AND ?"),
+    db.get(`SELECT SUM(s.total - COALESCE(pp.paid,0)) v FROM sales s ${PAID_JOIN} WHERE s.voided=0 AND s.customer_id IS NOT NULL`).then((r) => Math.max(0, money(r.v || 0))),
+    one(`SELECT SUM(s.total - COALESCE(pp.paid,0)) v FROM sales s LEFT JOIN (SELECT sale_id, SUM(amount) paid FROM payments WHERE voided=0 AND sale_id IS NOT NULL AND kind IN ('sale','deposit') GROUP BY sale_id) pp ON pp.sale_id = s.id WHERE s.voided=0 AND s.date BETWEEN ? AND ?`),
+  ]);
   return {
-    from, to, sales, discounts, receipts, cogs, gross: sales - cogs, expenses, losses, net: sales - cogs - expenses - losses, purchases,
+    from, to, sales, discounts, receipts, cogs, gross: sales - cogs, expenses, losses, kept_deposits: kept, net: sales - cogs - expenses - losses + kept, purchases,
+    received, owed_now: owedNow, credit_given: Math.max(0, money(creditGiven)),
     avg_receipt: receipts ? sales / receipts : 0,
     by_day, exp_by_day, by_item, by_category, by_method, by_staff, exp_by_category, voided,
   };
@@ -573,7 +641,7 @@ app.get("/api/users", auth, need("users"), wrap(async (req, res) => {
     db.all("SELECT id, name, username, phone, role, status, must_change, created_t, last_login_t FROM users ORDER BY status = 'pending' DESC, name"),
   ]);
   const active = Object.fromEntries(sess.map((r) => [r.user_id, r]));
-  res.json({ users: users.map((u) => ({ ...u, sessions: active[u.id]?.n || 0, last_seen_t: active[u.id]?.seen || null })) });
+  res.json({ users: users.map((u) => ({ ...u, sessions: active[u.id]?.n || 0, last_seen_t: active[u.id]?.seen || null, online: !!active[u.id]?.seen && now() - active[u.id].seen < 10 * 60e3 })) });
 }));
 // Administrator creates an account directly (active at once; must change the temporary password at first login).
 app.post("/api/users", auth, need("users"), wrap(async (req, res) => {
@@ -630,14 +698,14 @@ app.get("/api/audit", auth, need("audit"), wrap(async (req, res) => {
   res.json({ rows });
 }));
 
-const SETTING_KEYS = ["shop_name", "shop_tagline", "shop_address", "shop_phone", "receipt_footer", "idle_minutes", "allow_negative_stock", "allow_custom_items", "auto_backup_keep", "expense_categories", "payment_methods", "categories"];
-app.get("/api/settings", auth, need("settings"), wrap(async (req, res) => { const s = await settings(); res.json(Object.fromEntries(SETTING_KEYS.map((k) => [k, s[k]]))); }));
+const SETTING_KEYS = ["shop_name", "shop_tagline", "shop_address", "shop_phone", "receipt_footer", "idle_minutes", "allow_negative_stock", "allow_custom_items", "allow_signup", "auto_backup_keep", "expense_categories", "payment_methods", "categories"];
+app.get("/api/settings", auth, need("settings"), wrap(async (req, res) => { const s = await settings(); res.json({ ...Object.fromEntries(SETTING_KEYS.map((k) => [k, s[k]])), online: isRemote }); }));
 app.put("/api/settings", auth, need("settings"), wrap(async (req, res) => {
   const b = req.body || {}, updates = [], changed = [];
   for (const k of SETTING_KEYS) if (k in b) {
     let v = str(b[k], 600);
     if (k === "idle_minutes") { const m = Math.round(num(v)); if (m < 5 || m > 720) bad("Auto log-out must be between 5 and 720 minutes."); v = String(m); }
-    if (k === "allow_negative_stock" || k === "allow_custom_items") v = v === "1" || v === "true" ? "1" : "0";
+    if (k === "allow_negative_stock" || k === "allow_custom_items" || k === "allow_signup") v = v === "1" || v === "true" ? "1" : "0";
     if (k === "auto_backup_keep") { const m = Math.round(num(v)); if (m < 3 || m > 365) bad("Keep between 3 and 365 automatic backups."); v = String(m); }
     if (["expense_categories", "payment_methods", "categories"].includes(k)) { v = list(v).join(","); if (!v) bad("Lists cannot be empty."); }
     updates.push([v, k]); changed.push(k);
@@ -675,7 +743,10 @@ app.get("/api/backup", auth, need("backup"), wrap(async (req, res) => {
 // Errors and start-up
 // ======================================================================
 // Excel + PDF downloads for every section (see exports.js)
-require("./exports")(app, { db, stockLevels, report, can, settings, userNames, localDate, timeHM, dayStart, dayEnd, isDate, auth, audit, num });
+require("./exports")(app, { db, stockLevels, report, can, settings, userNames, localDate, timeHM, dayStart, dayEnd, isDate, auth, audit, num, money });
+// Debts, orders, closing the day, who is online (see features.js)
+require("./features")(app, { db, auth, need, wrap, bad, str, num, money, isDate, localDate, dayStart, dayEnd, now, audit, can, settings, list,
+  parsePayments, methodLabel, findOrCreateCustomer, insertSale, getSale });
 
 app.use("/api", (_req, res) => res.status(404).json({ error: "Not found." }));
 app.use((err, req, res, _next) => {

@@ -40,18 +40,20 @@ Or press **F5** in VS Code. To stop: click the terminal and press **Ctrl + C**.
 
 | Section | What it does |
 |---|---|
-| **Dashboard** | Today's sales and expenses, month profit, 14-day sales chart, best sellers, low stock, latest receipts |
-| **New sale** | Point of sale: tap items, change quantities, discount, customer, payment method → **printed receipt** with a number (e.g. R261124-001) |
+| **Dashboard** | Today's sales, money received and expenses, month profit, **money customers owe**, 14-day chart, best sellers, low stock, **orders to get ready**, **who is working now** |
+| **New sale** | Point of sale: tap items, quantities, discount, customer → **one payment, split payment** (e.g. part cash, part MoMo), or **credit** (customer pays later). Shows the **change** to give for cash. Printed receipt shows each payment and any balance owed. |
+| **Orders** | Cake orders with **pickup date/time, price and deposit**; more payments; mark ready; print an order slip; when the customer collects, it becomes a sale (deposits count; the rest is paid or put on credit). Cancel with deposit given back or kept. |
 | **Sales & receipts** | Every receipt by date; search; reprint; **cancel a sale** with a reason (managers) |
 | **Items** | Add / edit items, item codes (SKU), categories, cost & selling price, margin, reorder level |
 | **Inventory** | Stock levels and value; **Receive stock** (bought / made in kitchen / returned); **Used / damaged / expired**; **Stock count** to correct differences; full movement history per item |
 | **Expenses** | Record and review spending by type |
-| **Day book** | One day at a time: receipts, money by payment method, expenses, stock changes and **stock left at closing**. Printable. |
+| **Day book** | One day at a time: receipts, expenses, stock changes, stock left at closing, and the **money check**: money that should be there per payment method. **Close the day**: count cash and MoMo, the system shows any shortage or surplus (a note is required). |
+| **Money owed** | Every customer who owes money, since when, and **Receive** to record a repayment (goes to the oldest debts first). Statement per customer. |
 | **Reports** | Profit & loss, sales vs expenses chart, sales by item / category / payment / staff, **Export to Excel** |
-| **Customers** | Customer list with visits and total spent |
-| **Users & roles** | Approve sign-ups, set roles, switch accounts off, set temporary passwords, log people out |
-| **Audit log** | Every action: who, what, when, from which device. Cannot be edited. |
-| **Settings & backup** | Shop details, lists, auto log-out time, **download a full backup** |
+| **Customers** | Customer list with phone, visits, total spent and **what they owe**; statement of receipts and payments |
+| **Users & roles** | Add staff, set roles, switch accounts off, set temporary passwords, log people out. A green dot shows who is **online now**; **Activity** shows everything one person did (sales, money taken, expenses, stock, log-ins) on screen or as Excel/PDF. |
+| **Audit log** | Every action in plain words: who, what, when, from which device. Click a name to see that person's activity. Cannot be edited. |
+| **Settings & backup** | Shop details, lists, auto log-out time, whether staff may **sign up themselves** (off by default — you add staff in Users), **download a full backup** |
 
 ## 5. New in this version
 
